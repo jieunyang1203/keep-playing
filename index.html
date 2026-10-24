@@ -154,12 +154,17 @@ const clamp01 = (v) => Math.min(1, Math.max(0, v));
 let ac = null;
 function unlockAudio() {
   try {
+    // iOS: 'playback' 이면 무음 스위치가 켜져 있어도 소리가 남 (Safari 17+, 기본값은 무음 스위치를 따름)
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
     if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
-    if (ac.state === 'suspended') ac.resume();
+    if (ac.state !== 'running') ac.resume();
+    // iOS 는 탭하는 그 순간 실제로 뭔가를 재생해야 소리를 열어 줌 — 들리지 않는 아주 짧은 소리 하나
+    const b = ac.createBufferSource(); b.buffer = ac.createBuffer(1, 1, 22050); b.connect(ac.destination); b.start(0);
   } catch (_) { ac = null; }
 }
 function sound(i, k, ci) {
-  if (!ac || ac.state !== 'running') return;
+  if (!ac) return;
+  if (ac.state !== 'running') { ac.resume(); return; }   // iOS 는 전화·잠금 뒤 'interrupted' 가 됨
   const t = ac.currentTime, out = ac.createGain(), pan = ac.createStereoPanner ? ac.createStereoPanner() : null;
   out.gain.value = CFG.volume;
   if (pan) { pan.pan.value = i ? -0.35 : 0.35; out.connect(pan); pan.connect(ac.destination); } else out.connect(ac.destination);
@@ -278,7 +283,8 @@ if (LIVE) {
 // preview: 폰이 앞뒤로 기우는 시연. 마우스가 창 안에 있으면 마우스 위아래로 직접 (가만두면 멈춤),
 // 창 밖으로 나가 있으면 자동으로 번갈아
 let mouseTilt = null;
-addEventListener('pointerdown', unlockAudio);   // preview: 아무 데나 한 번 클릭하면 소리 켜짐
+addEventListener('pointerdown', unlockAudio);   // 아무 데나 누르면 소리 켜짐 (preview 의 첫 클릭, live 에서 소리가 끊겼을 때 다시 탭)
+addEventListener('touchend', unlockAudio);
 addEventListener('pointermove', (e) => {
   if (LIVE) return;
   const r = phone.getBoundingClientRect();
