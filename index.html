@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>keep playing</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css">
+<style>
+  /* 두 가지 모드
+     preview  데스크톱: 아이폰 16 프레임 안에서 시연. 폰이 앞뒤로 기울고(자동, 또는 마우스 위아래) 시소가 따라감
+     live     폰: 화면 전체. 실제 기울기(deviceorientation)로 시소가 움직임
+     ?live / ?preview 로 강제할 수 있음 */
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; background: #ecebe8; overflow: hidden; }
+  body { font-family: 'Pretendard Variable', Pretendard, sans-serif; -webkit-user-select: none; user-select: none; }
+
+  /* preview — 프레임 PNG 1359×2736, 투명한 화면 구멍 (90, 90) 에서 1179×2556 (portfolio 2 와 같은 비율) */
+  .stage { height: 100%; display: grid; place-items: center; perspective: 1800px; }
+  .phone { position: relative; height: min(88vh, 900px); aspect-ratio: 1359 / 2736; transform-style: preserve-3d; will-change: transform; }
+  .phone .screen { position: absolute; left: 6.6225%; top: 3.2895%; width: 86.755%; height: 93.421%;
+                   border-radius: 13.4% / 6.18%; overflow: hidden; background: #fff; }
+  .phone .frame { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* live */
+  body.live { background: #fff; }
+  body.live .stage { display: block; perspective: none; }
+  body.live .phone { height: 100%; width: 100%; aspect-ratio: auto; transform: none !important; }
+  body.live .phone .screen { inset: 0; width: 100%; height: 100%; border-radius: 0; }
+  body.live .phone .frame { display: none; }
+  .start { position: fixed; inset: 0; display: none; place-items: end center; padding-bottom: calc(18vh + env(safe-area-inset-bottom));
+           font-size: 15px; letter-spacing: 0.01em; color: #151413; background: transparent; border: 0; font-family: inherit; }
+  body.live.waiting .start { display: grid; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="phone" id="phone">
+    <div class="screen"><canvas id="c"></canvas></div>
+    <img class="frame" src="iphone16-white.png" alt="">
+  </div>
+</div>
+<button class="start" id="start" type="button">tap to play</button>
+<script>
+/* ───────── 설정 — scene.js 의 E 선화와 같은 값 ───────── */
+const CFG = {
+  ink: '#151413',
+  line: 1.2,                // 선 굵기 (px, 화면 기준)
+  colors: '#8bbd57 #7b5cc0 #e07a3c #3f7fd0 #e5c23b #e0607e',   // 땅에 닿을 때마다 이 순서로 바뀌는 원 색
+  lean: 15,                 // 세로 화면에서 판이 수직에서 기운 각도 (°) — 90° 만 돌리면 30°
+  fill: 0.97,               // 시소 전체(원 포함)가 화면을 채우는 비율
+  caption: 'the purpose of the game is simply to keep playing the game',
+  // 기울기 → 시소
+  sens: 0.17,               // 이만큼(sin) 기울이면 최대로 당김 (~10°)
+  dead: 0.04,               // 이보다 작은 기울기는 무시 (가만히 들고 있으면 멈춤)
+  accel: 18,                // 당기는 힘
+  damp: 0.8,
+  restitution: 0.22,        // 닿고 튕기는 정도
+  // 닿는 세기 → 세게 닿을수록 원이 크게 튐
+  bloom: 1,
+  // 소리 — 색 하나 = 음 하나 (colors 와 같은 순서, Hz). 도레미솔라도 펜타토닉
+  notes: [523.25, 587.33, 659.25, 783.99, 880, 1046.5],
+  volume: 0.8,
+};
+
+const L = 1.8, P = 0.55, A = Math.asin(P / L), W_ = 0.24, TH = 0.06;   // 판 반 길이 · 받침 높이 · 최대 기울기 · 판 반 폭 · 두께 (m)
+const R = L * Math.sin(A) * 1.18;                                       // 각 끝 아래 원 반지름
+const pal = CFG.colors.split(/\s+/);
+const params = new URLSearchParams(location.search);
+const mobile = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
+const LIVE = params.has('live') || (!params.has('preview') && mobile);
+document.body.classList.toggle('live', LIVE);
+
+const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+const phone = document.getElementById('phone');
+let cw = 0, ch = 0, dpr = 1;
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  dpr = Math.min(3, window.devicePixelRatio || 1);
+  cw = r.width; ch = r.height;
+  canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr);
+}
+addEventListener('resize', resize);
+
+/* ───────── 장면 좌표 ─────────
+   시소는 16:9 와 같은 가로 장면(아이소메트릭)으로 그리고, 세로 화면이면 통째로 돌려 얹음 (그녀가 잡은 방향:
+   판이 오른쪽 위 ↔ 왼쪽 아래로 길게, 원은 세로로 긴 타원). 시계 방향 90° 면 판이 수직에서 30° 기울고,
+   CFG.lean 만큼만 기울도록 덜 돌림. */
+const C30 = Math.cos(Math.PI / 6);
+const isoU = (x, y, z) => [(x - y) * C30, (x + y) * 0.5 - z];         // 1 m = 1 단위
+function scenePts(phs) {   // 실제로 그리는 것 — 원 · 판 · 손잡이 (주어진 기울기들에서) 의 윤곽 점 (m 단위)
+  const pts = [];
+  for (const s of [-1, 1]) {
+    for (let a = 0; a < 36; a++) { const t = a / 36 * Math.PI * 2; pts.push(isoU(s * L * Math.cos(A) + Math.cos(t) * R, Math.sin(t) * R, 0)); }
+  }
+  for (const ph of phs) {
+    const c = Math.cos(ph), sn = Math.sin(ph);
+    const Bm = (u, y, z) => isoU(u * c + z * sn, y, P - u * sn + z * c);
+    for (const u of [-L, L]) for (const y of [-W_, W_]) for (const z of [0, TH + 0.03]) pts.push(Bm(u, y, z));
+    for (const s2 of [-1, 1]) for (const y of [-W_ * 0.8, W_ * 0.8]) pts.push(Bm(s2 * L * 0.66, y, TH + 0.45));
+  }
+  return pts;
+}
+const allPts = scenePts([-A, 0, A]), levelPts = scenePts([0]);
+const turn = (q, th) => [q[0] * Math.cos(th) - q[1] * Math.sin(th), q[0] * Math.sin(th) + q[1] * Math.cos(th)];
+const box = (pts) => {
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+};
+
+function layout() {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 원점 + U × turn(장면 좌표))
+  const th = ch > cw ? Math.PI / 2 - (30 - CFG.lean) * Math.PI / 180 : 0;
+  const all = box(allPts.map((q) => turn(q, th))), lv = box(levelPts.map((q) => turn(q, th)));
+  // 가운데 = 수평일 때 상자의 중심. 크기 = 그 중심에서 양쪽 끝까지 기울였을 때 가장 먼 곳까지가 화면 안에 들도록
+  const mx = (lv.x0 + lv.x1) / 2, my = (lv.y0 + lv.y1) / 2;
+  const hw = Math.max(mx - all.x0, all.x1 - mx), hh = Math.max(my - all.y0, all.y1 - my);
+  const U = Math.min(cw * CFG.fill / (2 * hw), ch * CFG.fill / (2 * hh));
+  return { th, U, ox: cw / 2 - mx * U, oy: ch / 2 - my * U };
+}
+
+/* ───────── 시소 물리 ─────────
+   s: −1…+1, +1 = 왼쪽(−x) 끝이 땅에 닿음. 기울어진 쪽으로 당겨져 떨어지고, 끝에서 짧게 튕김.
+   끝이 제법 빠르게 닿으면 '착지' — 그 끝 원의 색이 다음으로 바뀜. 안 기울이면 한쪽에 내려앉은 채 멈춤. */
+const st = { s: 1, v: 0, hits: [0, 0], land: [-1e9, -1e9], k: [0, 0], armed: [true, true] };   // hits[0] 왼쪽, [1] 오른쪽 · land 착지 시각(ms) · k 착지 세기 0…1
+const colorOf = (i) => (st.hits[i] + (i ? 3 : 0)) % pal.length;     // 그 끝 원의 지금 색 (오른쪽은 팔레트 3칸 밀림)
+function step(dt, input, now) {
+  const g = Math.abs(input) < CFG.dead ? 0 : input;
+  st.v += (CFG.accel * g - CFG.damp * st.v) * dt;
+  st.s += st.v * dt;
+  if (st.s < 0.5) st.armed[0] = true;   // 반 넘게 떠났다 와야 다음 착지로 셈 (튕겼다 다시 떨어지는 건 안 셈)
+  if (st.s > -0.5) st.armed[1] = true;
+  for (const e of [1, -1]) {
+    if (st.s * e > 1) {
+      st.s = e;
+      const imp = st.v * e;
+      const i = e > 0 ? 0 : 1;
+      if (imp > 0.9 && st.armed[i]) {   // 착지
+        const k = clamp01((imp - 0.9) / 7.5);   // 끝까지 확 기울이면 ~0.9, 살살이면 ~0.4
+        st.armed[i] = false; st.hits[i]++; st.land[i] = now; st.k[i] = k;
+        sound(i, k, colorOf(i));
+        if (LIVE && navigator.vibrate) navigator.vibrate(Math.round(8 + 22 * k));
+      }
+      st.v = imp > 0.9 ? -st.v * CFG.restitution : 0;
+    }
+  }
+}
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+/* ───────── 소리 ─────────
+   닿을 때: 낮은 '툭' (사인 110→48Hz 로 떨어지는 짧은 음) + 그 끝 원의 새 색에 맞는 음 (마림바처럼 4배음이 빨리 사라짐).
+   세게 닿을수록 크게. 왼쪽 끝(화면 위·오른쪽)은 오른쪽 스피커로 조금, 반대 끝은 왼쪽으로.
+   브라우저는 사용자가 한 번 누르기 전엔 소리를 막아서, 첫 탭/클릭 때 켬. */
+let ac = null;
+function unlockAudio() {
+  try {
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === 'suspended') ac.resume();
+  } catch (_) { ac = null; }
+}
+function sound(i, k, ci) {
+  if (!ac || ac.state !== 'running') return;
+  const t = ac.currentTime, out = ac.createGain(), pan = ac.createStereoPanner ? ac.createStereoPanner() : null;
+  out.gain.value = CFG.volume;
+  if (pan) { pan.pan.value = i ? -0.35 : 0.35; out.connect(pan); pan.connect(ac.destination); } else out.connect(ac.destination);
+  const tone = (f, f2, peak, dur, type = 'sine') => {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t);
+    if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur * 0.6);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(out); o.start(t); o.stop(t + dur + 0.02);
+  };
+  tone(110, 48, 0.12 + 0.35 * k, 0.16);                         // 툭
+  const f = CFG.notes[ci % CFG.notes.length];
+  tone(f, 0, 0.05 + 0.16 * k, 0.7 + 0.8 * k);                   // 색의 음
+  tone(f * 4, 0, 0.02 + 0.05 * k, 0.12);                        // 맑은 배음 (금방 사라짐)
+}
+
+/* 기울기 입력: 화면 평면 위 중력 방향(시작할 때 자세를 0 으로) 을 판 방향(화면에서 오른쪽 끝 → 왼쪽 끝)에 투영 */
+function plankDir(Lo) {
+  const a = turn(isoU(-L * Math.cos(A), 0, P), Lo.th), b = turn(isoU(L * Math.cos(A), 0, P), Lo.th);
+  const dx = a[0] - b[0], dy = a[1] - b[1], n = Math.hypot(dx, dy) || 1;
+  return [dx / n, dy / n];
+}
+/** 화면 좌표계에서 본 중력의 기울기 성분 (x 오른쪽, y 아래쪽) */
+const gravity = (beta, gamma) => [Math.sin(gamma * Math.PI / 180), Math.sin(beta * Math.PI / 180)];
+
+/* ───────── 그리기 — scene.js HTB.E 와 같은 화법 ───────── */
+function draw(now) {
+  const Lo = layout();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cw, ch);
+
+  ctx.save();
+  ctx.translate(Lo.ox, Lo.oy); ctx.rotate(Lo.th);
+  const U = Lo.U;
+  const iso = (x, y, z) => { const q = isoU(x, y, z); return [q[0] * U, q[1] * U]; };
+  const phi = st.s * A;                                               // + = 왼쪽이 내려감
+  ctx.lineWidth = CFG.line; ctx.strokeStyle = CFG.ink; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  const face = (pts) => { ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.closePath(); ctx.fillStyle = '#fff'; ctx.fill(); ctx.stroke(); };
+  const line = (a, b) => { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); };
+
+  // 땅에 눕힌 원 — 각 끝이 닿을 때마다 다음 색. 닿는 순간 세기만큼 원이 튐 (퍼지는 고리는 그녀 요청으로 뺌)
+  const ring = (cxm, r) => {
+    ctx.beginPath();
+    for (let a = 0; a <= 72; a++) {
+      const t = a / 72 * Math.PI * 2, q = iso(cxm + Math.cos(t) * r, Math.sin(t) * r, 0);
+      a ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
+    }
+    ctx.closePath();
+  };
+  for (const s2 of [-1, 1]) {
+    const i = s2 < 0 ? 0 : 1, col = pal[colorOf(i)], cxm = s2 * L * Math.cos(A);
+    const tau = (now - st.land[i]) / 1000, k = st.k[i] * CFG.bloom;
+    // 원: 닿는 순간 1 + 0.22k 배로 튀었다가 0.25초 안에 돌아옴
+    ring(cxm, R * (1 + 0.22 * k * Math.exp(-Math.max(0, tau) / 0.08) * (tau >= 0 ? 1 : 0)));
+    ctx.fillStyle = col; ctx.fill();
+  }
+  ctx.strokeStyle = CFG.ink; ctx.lineWidth = CFG.line;
+
+  // 받침: 삼각 기둥
+  const fw = 0.22, fd = 0.3;
+  face([iso(-fw, -fd, 0), iso(0, -fd, P), iso(0, fd, P), iso(-fw, fd, 0)]);
+  face([iso(fw, -fd, 0), iso(0, -fd, P), iso(0, fd, P), iso(fw, fd, 0)]);
+  face([iso(-fw, fd, 0), iso(0, fd, P), iso(fw, fd, 0)]);
+
+  // 판
+  const c = Math.cos(phi), sn = Math.sin(phi);
+  const B = (u, y, z) => iso(u * c + z * sn, y, P - u * sn + z * c);
+  face([B(-L, W_, 0), B(L, W_, 0), B(L, W_, TH), B(-L, W_, TH)]);
+  face([B(L, -W_, 0), B(L, W_, 0), B(L, W_, TH), B(L, -W_, TH)]);
+  face([B(-L, -W_, TH), B(L, -W_, TH), B(L, W_, TH), B(-L, W_, TH)]);
+  for (const s2 of [-1, 1]) {
+    const u0 = s2 * L * 0.86;
+    face([B(u0 - 0.28, -W_ * 0.9, TH + 0.03), B(u0 + 0.28, -W_ * 0.9, TH + 0.03), B(u0 + 0.28, W_ * 0.9, TH + 0.03), B(u0 - 0.28, W_ * 0.9, TH + 0.03)]);
+    const uh = s2 * L * 0.66;
+    line(B(uh, -W_ * 0.7, TH), B(uh, -W_ * 0.7, TH + 0.45));
+    line(B(uh, W_ * 0.7, TH), B(uh, W_ * 0.7, TH + 0.45));
+    line(B(uh, -W_ * 0.8, TH + 0.45), B(uh, W_ * 0.8, TH + 0.45));
+  }
+  ctx.restore();
+
+  // 문장 — 돌리지 않고 화면 아래에 작게
+  const size = Math.max(10, Math.min(14, cw / 30));
+  ctx.font = `500 ${size}px 'Pretendard Variable', Pretendard, sans-serif`;
+  ctx.fillStyle = CFG.ink; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(CFG.caption, cw / 2, ch - Math.max(28, ch * 0.045));
+  return Lo;
+}
+
+/* ───────── 입력 ───────── */
+// live: 실제 기울기. 처음 탭(iOS 권한)한 순간의 자세를 0 으로
+let ori = null, base = null;
+function onOri(e) {
+  if (e.beta == null) return;
+  ori = gravity(e.beta, e.gamma);
+  if (!base) base = ori.slice();
+}
+async function begin() {
+  unlockAudio();
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      if (await DeviceOrientationEvent.requestPermission() !== 'granted') return;
+    }
+  } catch (_) { return; }
+  addEventListener('deviceorientation', onOri);
+  base = null;
+  document.body.classList.remove('waiting');
+}
+if (LIVE) {
+  document.body.classList.add('waiting');
+  document.getElementById('start').addEventListener('click', begin);
+  canvas.addEventListener('dblclick', () => { base = null; });   // 두 번 탭: 지금 자세를 다시 0 으로
+}
+
+// preview: 폰이 앞뒤로 기우는 시연. 마우스가 창 안에 있으면 마우스 위아래로 직접 (가만두면 멈춤),
+// 창 밖으로 나가 있으면 자동으로 번갈아
+let mouseTilt = null;
+addEventListener('pointerdown', unlockAudio);   // preview: 아무 데나 한 번 클릭하면 소리 켜짐
+addEventListener('pointermove', (e) => {
+  if (LIVE) return;
+  const r = phone.getBoundingClientRect();
+  mouseTilt = Math.max(-1, Math.min(1, (e.clientY - (r.top + r.height / 2)) / (r.height * 0.35)));
+});
+document.documentElement.addEventListener('pointerleave', () => { mouseTilt = null; });
+function demoTilt(now) {
+  if (mouseTilt != null) return mouseTilt;
+  const t = now / 1000, amp = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t * Math.PI * 2 / 11));   // 11초에 걸쳐 살살 ↔ 세게
+  return amp * Math.tanh(5 * Math.sin(t * Math.PI * 2 / 3.6));   // 한쪽으로 기울였다가 반대로 — 3.6초에 한 번 왕복
+}
+
+/* ───────── 루프 ───────── */
+let last = performance.now(), Lo = null, shown = 0;
+function frame(now) {
+  const dt = Math.min(0.033, (now - last) / 1000); last = now;
+  if (!cw) resize();
+  if (Lo) {
+    const d = plankDir(Lo);
+    let input = 0;
+    if (LIVE) {
+      if (ori && base) input = ((ori[0] - base[0]) * d[0] + (ori[1] - base[1]) * d[1]) / CFG.sens;
+    } else {
+      // 폰 윗부분이 멀어질수록(+) 화면 위쪽이 낮아짐 → 중력이 화면 위쪽(−y)으로
+      const tilt = demoTilt(now);
+      shown += (tilt - shown) * Math.min(1, dt * 8);
+      phone.style.transform = `rotateX(${(shown * 16).toFixed(2)}deg)`;
+      input = (-Math.sin(shown * 16 * Math.PI / 180) * d[1]) / CFG.sens;
+    }
+    step(dt, Math.max(-1, Math.min(1, input)), now);
+  }
+  Lo = draw(now);
+  requestAnimationFrame(frame);
+}
+document.fonts.ready.then(() => { resize(); requestAnimationFrame(frame); });
+</script>
+</body>
+</html>
