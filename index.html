@@ -159,6 +159,10 @@ function layout(cap) {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 
   const mx = (lv.x0 + lv.x1) / 2, my = (lv.y0 + lv.y1) / 2;
   const hw = Math.max(mx - all.x0, all.x1 - mx), hh = Math.max(my - all.y0, all.y1 - my);
   const f = LIVE ? CFG.fill : CFG.fillDesk;
+  if (!LIVE) {   // 데스크톱: 세로는 양쪽 끝까지 기울인 전체 범위의 가운데에 (수평 중심 기준이면 위가 꽉 차고 아래가 남음)
+    const U = Math.min(aw * f / (2 * hw), ah * f / (all.y1 - all.y0));
+    return { th, U, ox: aw / 2 - mx * U, oy: top + ah / 2 - (all.y0 + all.y1) / 2 * U };
+  }
   const U = Math.min(aw * f / (2 * hw), ah * f / (2 * hh));
   return { th, U, ox: aw / 2 - mx * U, oy: top + ah / 2 - my * U };
 }
