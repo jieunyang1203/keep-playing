@@ -6,45 +6,27 @@
 <title>keep playing</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css">
 <style>
-  /* 두 가지 모드
-     preview  데스크톱: 아이폰 16 프레임 안에서 시연. 폰이 앞뒤로 기울고(자동, 또는 마우스 위아래) 시소가 따라감
-     live     폰: 화면 전체. 실제 기울기(deviceorientation)로 시소가 움직임
-     ?live / ?preview 로 강제할 수 있음 */
+  /* 두 가지 모드 — 둘 다 화면 전체에 시소만
+     live    폰: 실제 기울기(deviceorientation)로 시소를 움직임. ?room= 이 있으면 그 데스크톱으로 상태를 보냄
+     mirror  데스크톱: 직접은 못 움직임. 오른쪽 아래 QR 을 폰으로 찍으면 그 폰 화면을 그대로 비춤
+     ?live 로 데스크톱에서도 live 를 강제할 수 있음 */
   * { box-sizing: border-box; margin: 0; }
-  html, body { height: 100%; background: #ecebe8; overflow: hidden; }
+  html, body { height: 100%; background: #fff; overflow: hidden; }
   body { font-family: 'Pretendard Variable', Pretendard, sans-serif; -webkit-user-select: none; user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
 
-  /* preview — 프레임 PNG 1359×2736, 투명한 화면 구멍 (90, 90) 에서 1179×2556 (portfolio 2 와 같은 비율) */
-  .stage { height: 100%; display: grid; place-items: center; perspective: 1800px; }
-  .phone { position: relative; height: min(88vh, 900px); aspect-ratio: 1359 / 2736; transform-style: preserve-3d; will-change: transform; }
-  .phone .screen { position: absolute; left: 6.6225%; top: 3.2895%; width: 86.755%; height: 93.421%;
-                   border-radius: 13.4% / 6.18%; overflow: hidden; background: #fff; }
-  .phone .frame { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  canvas { display: block; width: 100%; height: 100%; }
-
-  /* live */
-  body.live { background: #fff; }
-  body.live .stage { display: block; perspective: none; }
-  body.live .phone { height: 100%; width: 100%; aspect-ratio: auto; transform: none !important; }
-  body.live .phone .screen { inset: 0; width: 100%; height: 100%; border-radius: 0; }
-  body.live .phone .frame { display: none; }
   .start { position: fixed; inset: 0; display: none; place-items: end center; padding-bottom: calc(18vh + env(safe-area-inset-bottom));
            font-size: 15px; letter-spacing: 0.01em; color: #151413; background: transparent; border: 0; font-family: inherit; }
   body.live.waiting .start { display: grid; }
 
-  /* preview 오른쪽 아래 QR — 폰으로 찍으면 그 폰이 이 화면과 연결됨. 연결되면 숨김 */
-  .qr { position: fixed; right: 32px; bottom: 32px; width: 112px; height: 112px; padding: 8px; background: #fff; display: none; }
+  /* mirror 오른쪽 아래 QR — 폰으로 찍으면 그 폰이 이 화면과 연결됨. 연결되면 숨김 */
+  .qr { position: fixed; right: 40px; bottom: 40px; width: 136px; height: 136px; display: none; }
   .qr svg { display: block; width: 100%; height: 100%; }
   body.has-room:not(.live):not(.paired) .qr { display: block; }
 </style>
 </head>
 <body>
-<div class="stage">
-  <div class="phone" id="phone">
-    <div class="screen"><canvas id="c"></canvas></div>
-    <img class="frame" src="iphone16-white.png" alt="">
-  </div>
-</div>
+<canvas id="c"></canvas>
 <button class="start" id="start" type="button">tap to play</button>
 <div class="qr" id="qr"></div>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
@@ -56,7 +38,8 @@ const CFG = {
   line: 1.2,                // 선 굵기 (px, 화면 기준)
   colors: '#8bbd57 #7b5cc0 #e07a3c #3f7fd0 #e5c23b #e0607e',   // 땅에 닿을 때마다 이 순서로 바뀌는 원 색
   lean: 15,                 // 세로 화면에서 판이 수직에서 기운 각도 (°) — 90° 만 돌리면 30°
-  fill: 0.97,               // 시소 전체(원 포함)가 화면을 채우는 비율
+  fill: 0.97,               // 시소 전체(원 포함)가 화면을 채우는 비율 (폰)
+  fillDesk: 0.86,           // 데스크톱
   caption: 'the purpose of the game is simply to keep playing the game',
   // 기울기 → 시소
   sens: 0.17,               // 이만큼(sin) 기울이면 최대로 당김 (~10°)
@@ -76,11 +59,10 @@ const R = L * Math.sin(A) * 1.18;                                       // 각 �
 const pal = CFG.colors.split(/\s+/);
 const params = new URLSearchParams(location.search);
 const mobile = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
-const LIVE = params.has('live') || (!params.has('preview') && mobile);
+const LIVE = params.has('live') || params.has('room') || mobile;
 document.body.classList.toggle('live', LIVE);
 
 const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
-const phone = document.getElementById('phone');
 let cw = 0, ch = 0, dpr = 1;
 function resize() {
   const r = canvas.getBoundingClientRect();
@@ -117,13 +99,14 @@ const box = (pts) => {
 };
 
 function layout() {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 원점 + U × turn(장면 좌표))
-  const th = ch > cw ? Math.PI / 2 - (30 - CFG.lean) * Math.PI / 180 : 0;
+  const th = ch > cw || !LIVE ? Math.PI / 2 - (30 - CFG.lean) * Math.PI / 180 : 0;   // 데스크톱(mirror)도 폰과 같은 구도
   const all = box(allPts.map((q) => turn(q, th))), lv = box(levelPts.map((q) => turn(q, th)));
   // 가운데 = 수평일 때 상자의 중심. 크기 = 그 중심에서 양쪽 끝까지 기울였을 때 가장 먼 곳까지가 화면 안에 들도록
   const mx = (lv.x0 + lv.x1) / 2, my = (lv.y0 + lv.y1) / 2;
   const hw = Math.max(mx - all.x0, all.x1 - mx), hh = Math.max(my - all.y0, all.y1 - my);
-  const U = Math.min(cw * CFG.fill / (2 * hw), ch * CFG.fill / (2 * hh));
-  return { th, U, ox: cw / 2 - mx * U, oy: ch / 2 - my * U };
+  const f = LIVE ? CFG.fill : CFG.fillDesk;
+  const U = Math.min(cw * f / (2 * hw), (ch - (LIVE ? 0 : 90)) * f / (2 * hh));   // 데스크톱은 아래 문장 자리를 비움
+  return { th, U, ox: cw / 2 - mx * U, oy: (ch - (LIVE ? 0 : 90)) / 2 - my * U };
 }
 
 /* ───────── 시소 물리 ─────────
@@ -256,7 +239,7 @@ function draw(now) {
   ctx.restore();
 
   // 문장 — 돌리지 않고 화면 아래에 작게
-  const size = Math.max(10, Math.min(14, cw / 30));
+  const size = Math.max(10, Math.min(LIVE ? 14 : 22, cw / 30));   // 데스크톱은 조금 크게
   ctx.font = `500 ${size}px 'Pretendard Variable', Pretendard, sans-serif`;
   ctx.fillStyle = CFG.ink; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.fillText(CFG.caption, cw / 2, ch - Math.max(28, ch * 0.045));
@@ -288,26 +271,11 @@ if (LIVE) {
   canvas.addEventListener('dblclick', () => { base = null; });   // 두 번 탭: 지금 자세를 다시 0 으로
 }
 
-// preview: 폰이 앞뒤로 기우는 시연. 마우스가 창 안에 있으면 마우스 위아래로 직접 (가만두면 멈춤),
-// 창 밖으로 나가 있으면 자동으로 번갈아
-let mouseTilt = null;
-addEventListener('pointerdown', unlockAudio);   // 아무 데나 누르면 소리 켜짐 (preview 의 첫 클릭, live 에서 소리가 끊겼을 때 다시 탭)
+addEventListener('pointerdown', unlockAudio);   // 아무 데나 누르면 소리 켜짐 (mirror 의 첫 클릭, live 에서 소리가 끊겼을 때 다시 탭)
 addEventListener('touchend', unlockAudio);
-addEventListener('pointermove', (e) => {
-  if (LIVE) return;
-  const r = phone.getBoundingClientRect();
-  mouseTilt = Math.max(-1, Math.min(1, (e.clientY - (r.top + r.height / 2)) / (r.height * 0.35)));
-});
-document.documentElement.addEventListener('pointerleave', () => { mouseTilt = null; });
-function demoTilt(now) {
-  if (mouseTilt != null) return mouseTilt;
-  const t = now / 1000, amp = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t * Math.PI * 2 / 11));   // 11초에 걸쳐 살살 ↔ 세게
-  return amp * Math.tanh(5 * Math.sin(t * Math.PI * 2 / 3.6));   // 한쪽으로 기울였다가 반대로 — 3.6초에 한 번 왕복
-}
 
 /* ───────── 폰 ↔ 데스크톱 (PeerJS) ─────────
-   데스크톱(preview): 방을 열고 QR 에 '?live&room=방' 주소를 담음. 연결되면 자기 시연을 멈추고 폰이 보내는 상태를 그대로 그림
-     (시소 위치 · 착지 횟수 · 세기, 그리고 폰이 기운 각도로 프레임도 같이 기울임).
+   데스크톱(mirror): 방을 열고 QR 에 '?room=방' 주소를 담음. 연결되면 폰이 보내는 상태(시소 위치 · 착지 횟수 · 세기)를 그대로 그림.
    폰(live + room): 그 방에 붙어서 매 프레임 상태를 보냄. 처음 연결만 PeerJS 공용 서버를 거치고 그 뒤로는 폰↔데스크톱 직접. */
 const ROOM = params.get('room');
 let conn = null, remote = null, remoteAt = -1e9;
@@ -316,7 +284,7 @@ function hostRoom() {
   const id = 'keepplaying-' + Math.random().toString(36).slice(2, 10);
   const peer = new Peer(id);
   peer.on('open', () => {
-    const url = location.origin + location.pathname + '?live&room=' + id;
+    const url = location.origin + location.pathname + '?room=' + id;
     if (typeof qrcode !== 'undefined') {
       const q = qrcode(0, 'M'); q.addData(url); q.make();
       document.getElementById('qr').innerHTML = q.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
@@ -344,18 +312,15 @@ function joinRoom() {
   peer.on('error', (e) => { if (e.type === 'peer-unavailable' || e.type === 'network') { peer.destroy(); setTimeout(joinRoom, 2000); } });
 }
 if (LIVE && ROOM) joinRoom();
-if (!LIVE && !params.has('solo')) hostRoom();
+if (!LIVE) hostRoom();
 
-/** 폰 → 데스크톱 한 프레임 상태. rx·ry = 폰이 시작 자세에서 앞뒤·좌우로 기운 각도 (데스크톱 프레임용, °) */
+/** 폰 → 데스크톱 한 프레임 상태 */
 function sendState() {
   if (!conn || !conn.open) return;
-  const deg = (v) => Math.max(-35, Math.min(35, Math.asin(Math.max(-1, Math.min(1, v))) * 180 / Math.PI));
-  const rx = ori && base ? -deg(ori[1] - base[1]) : 0, ry = ori && base ? deg(ori[0] - base[0]) : 0;
-  conn.send({ s: +st.s.toFixed(4), h: st.hits, k: st.k.map((k) => +k.toFixed(3)), rx: +rx.toFixed(1), ry: +ry.toFixed(1) });
+  conn.send({ s: +st.s.toFixed(4), h: st.hits, k: st.k.map((k) => +k.toFixed(3)) });
 }
 /** 데스크톱: 받은 상태를 그대로 적용. 착지 횟수가 늘면 그때 원이 튀고 소리 (데스크톱도 한 번 클릭해 두면 소리 남) */
-let rxs = 0, rys = 0;
-function applyRemote(now, dt) {
+function applyRemote(now) {
   const m = remote;
   st.s = m.s;
   for (const i of [0, 1]) if (m.h[i] !== st.hits[i]) {
@@ -363,33 +328,22 @@ function applyRemote(now, dt) {
     st.hits[i] = m.h[i]; st.k[i] = m.k[i];
     if (landed) { st.land[i] = now; sound(i, m.k[i], colorOf(i)); }
   }
-  const a = Math.min(1, dt * 12);
-  rxs += (m.rx - rxs) * a; rys += (m.ry - rys) * a;
-  phone.style.transform = `rotateX(${rxs.toFixed(2)}deg) rotateY(${rys.toFixed(2)}deg)`;
 }
 
 /* ───────── 루프 ───────── */
-let last = performance.now(), Lo = null, shown = 0;
+let last = performance.now(), Lo = null;
 function frame(now) {
   const dt = Math.min(0.033, (now - last) / 1000); last = now;
   if (!cw) resize();
-  const paired = !LIVE && remote && now - remoteAt < 1500;
-  document.body.classList.toggle('paired', !!paired);
-  if (paired) applyRemote(now, dt);
-  else if (Lo) {
+  if (!LIVE) {   // mirror: 폰이 보내는 동안만 움직이고, 아니면 그 자리에 멈춰 있음
+    const paired = remote && now - remoteAt < 1500;
+    document.body.classList.toggle('paired', !!paired);
+    if (paired) applyRemote(now);
+  } else if (Lo) {
     const d = plankDir(Lo);
-    let input = 0;
-    if (LIVE) {
-      if (ori && base) input = ((ori[0] - base[0]) * d[0] + (ori[1] - base[1]) * d[1]) / CFG.sens;
-    } else {
-      // 폰 윗부분이 멀어질수록(+) 화면 위쪽이 낮아짐 → 중력이 화면 위쪽(−y)으로
-      const tilt = demoTilt(now);
-      shown += (tilt - shown) * Math.min(1, dt * 8);
-      phone.style.transform = `rotateX(${(shown * 16).toFixed(2)}deg)`;
-      input = (-Math.sin(shown * 16 * Math.PI / 180) * d[1]) / CFG.sens;
-    }
+    const input = ori && base ? ((ori[0] - base[0]) * d[0] + (ori[1] - base[1]) * d[1]) / CFG.sens : 0;
     step(dt, Math.max(-1, Math.min(1, input)), now);
-    if (LIVE) sendState();
+    sendState();
   }
   Lo = draw(now);
   requestAnimationFrame(frame);
