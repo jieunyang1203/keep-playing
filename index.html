@@ -30,6 +30,7 @@
 <button class="start" id="start" type="button">tap to play</button>
 <div class="qr" id="qr"></div>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script>
 /* ───────── 설정 — scene.js 의 E 선화와 같은 값 ───────── */
@@ -42,8 +43,9 @@ const CFG = {
   fillDesk: 0.86,           // 데스크톱
   caption: 'the purpose of the game is simply to keep playing the game',
   // 기울기 → 시소
-  sens: 0.17,               // 이만큼(sin) 기울이면 최대로 당김 (~10°)
-  dead: 0.04,               // 이보다 작은 기울기는 무시 (가만히 들고 있으면 멈춤)
+  sens: 0.09,               // 시작 자세에서 이만큼(sin) 기울이면 최대로 당김 (~5°)
+  dead: 0.015,              // 이보다 작은 기울기는 무시 (가만히 들고 있으면 멈춤, ~1°)
+  sideways: 0.7,            // 좌우로 기울여도 움직이게 — 판이 거의 세로라 원래는 좌우 기울기가 잘 안 먹힘
   accel: 18,                // 당기는 힘
   damp: 0.8,
   restitution: 0.22,        // 닿고 튕기는 정도
@@ -99,7 +101,7 @@ const box = (pts) => {
 };
 
 function layout() {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 원점 + U × turn(장면 좌표))
-  const th = ch > cw || !LIVE ? Math.PI / 2 - (30 - CFG.lean) * Math.PI / 180 : 0;   // 데스크톱(mirror)도 폰과 같은 구도
+  const th = ch > cw ? Math.PI / 2 - (30 - CFG.lean) * Math.PI / 180 : 0;   // 세로 화면(폰)만 돌림 — 데스크톱은 가로로 놓인 원래 장면
   const all = box(allPts.map((q) => turn(q, th))), lv = box(levelPts.map((q) => turn(q, th)));
   // 가운데 = 수평일 때 상자의 중심. 크기 = 그 중심에서 양쪽 끝까지 기울였을 때 가장 먼 곳까지가 화면 안에 들도록
   const mx = (lv.x0 + lv.x1) / 2, my = (lv.y0 + lv.y1) / 2;
@@ -181,7 +183,9 @@ function plankDir(Lo) {
   return [dx / n, dy / n];
 }
 /** 화면 좌표계에서 본 중력의 기울기 성분 (x 오른쪽, y 아래쪽) */
-const gravity = (beta, gamma) => [Math.sin(gamma * Math.PI / 180), Math.sin(beta * Math.PI / 180)];
+// (예전: sin(beta) 를 그대로 쓰면 폰을 세워 들었을 때(beta ≈ 70–90°) 값이 거의 안 변해서 둔했음 → 시작 자세와의 각도 차이로)
+const wrap = (a) => ((a + 540) % 360) - 180;
+const tiltOf = (o, b) => [Math.sin(wrap(o.gamma - b.gamma) * Math.PI / 180), Math.sin(wrap(o.beta - b.beta) * Math.PI / 180)];
 
 /* ───────── 그리기 — scene.js HTB.E 와 같은 화법 ───────── */
 function draw(now) {
@@ -248,11 +252,11 @@ function draw(now) {
 
 /* ───────── 입력 ───────── */
 // live: 실제 기울기. 처음 탭(iOS 권한)한 순간의 자세를 0 으로
-let ori = null, base = null;
+let ori = null, base = null;   // 지금 / 시작 자세의 { beta, gamma } (°)
 function onOri(e) {
   if (e.beta == null) return;
-  ori = gravity(e.beta, e.gamma);
-  if (!base) base = ori.slice();
+  ori = { beta: e.beta, gamma: e.gamma || 0 };
+  if (!base) base = { ...ori };
 }
 async function begin() {
   unlockAudio();
@@ -274,55 +278,72 @@ if (LIVE) {
 addEventListener('pointerdown', unlockAudio);   // 아무 데나 누르면 소리 켜짐 (mirror 의 첫 클릭, live 에서 소리가 끊겼을 때 다시 탭)
 addEventListener('touchend', unlockAudio);
 
-/* ───────── 폰 ↔ 데스크톱 (PeerJS) ─────────
-   데스크톱(mirror): 방을 열고 QR 에 '?room=방' 주소를 담음. 연결되면 폰이 보내는 상태(시소 위치 · 착지 횟수 · 세기)를 그대로 그림.
-   폰(live + room): 그 방에 붙어서 매 프레임 상태를 보냄. 처음 연결만 PeerJS 공용 서버를 거치고 그 뒤로는 폰↔데스크톱 직접. */
+/* ───────── 폰 ↔ 데스크톱 ─────────
+   데스크톱(mirror): 방 번호를 만들고 QR 에 '?room=방' 주소를 담음. 폰이 보내는 상태(시소 위치 · 착지 횟수 · 세기)를 그대로 그림.
+   폰(live + room): 매 프레임 상태를 두 길로 동시에 보냄 — 데스크톱은 먼저 도착한 것(번호가 더 큰 것)만 씀.
+     ① PeerJS: 폰↔데스크톱 직접 (빠름). 네트워크에 따라 직접 연결이 막힐 때가 있음
+     ② 공개 MQTT 브로커(EMQX)를 거쳐 전달: 조금 느리지만 거의 어디서나 됨 (10-25 실제 폰에서 ① 이 안 붙어서 추가) */
 const ROOM = params.get('room');
-let conn = null, remote = null, remoteAt = -1e9;
+const BROKER = 'wss://broker.emqx.io:8084/mqtt', TOPIC = (id) => 'keepplaying/v1/' + id;
+let conn = null, mq = null, remote = null, remoteAt = -1e9, seq = 0, lastSeq = -1;
+function receive(m) {
+  if (!m || typeof m.n !== 'number') return;
+  if (performance.now() - remoteAt < 1500 && m.n <= lastSeq) return;   // 다른 길로 늦게 온 옛 상태는 버림 (끊겼다 새로 열린 폰은 번호가 0 부터라 받음)
+  lastSeq = m.n; remote = m; remoteAt = performance.now();
+}
 function hostRoom() {
-  if (typeof Peer === 'undefined') return;
   const id = 'keepplaying-' + Math.random().toString(36).slice(2, 10);
-  const peer = new Peer(id);
-  peer.on('open', () => {
-    const url = location.origin + location.pathname + '?room=' + id;
-    if (typeof qrcode !== 'undefined') {
-      const q = qrcode(0, 'M'); q.addData(url); q.make();
-      document.getElementById('qr').innerHTML = q.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
-    }
-    document.getElementById('qr').dataset.url = url;
-    document.body.classList.add('has-room');
-  });
-  peer.on('connection', (c) => {
-    if (conn) conn.close();
-    conn = c;
-    c.on('data', (m) => { remote = m; remoteAt = performance.now(); });
-    c.on('close', () => { if (conn === c) { conn = null; remote = null; } });
-  });
-  peer.on('disconnected', () => peer.reconnect());
-  peer.on('error', (e) => { if (e.type === 'unavailable-id') { peer.destroy(); hostRoom(); } });
+  const url = location.origin + location.pathname + '?room=' + id;
+  if (typeof qrcode !== 'undefined') {
+    const q = qrcode(0, 'M'); q.addData(url); q.make();
+    document.getElementById('qr').innerHTML = q.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+  }
+  document.getElementById('qr').dataset.url = url;
+  document.body.classList.add('has-room');
+  // ② MQTT
+  if (typeof mqtt !== 'undefined') {
+    mq = mqtt.connect(BROKER, { reconnectPeriod: 2000, clean: true });
+    mq.on('connect', () => mq.subscribe(TOPIC(id)));
+    mq.on('message', (_, buf) => { try { receive(JSON.parse(buf.toString())); } catch (_) {} });
+  }
+  // ① PeerJS
+  if (typeof Peer !== 'undefined') {
+    const peer = new Peer(id);
+    peer.on('connection', (c) => {
+      if (conn) conn.close();
+      conn = c;
+      c.on('data', receive);
+      c.on('close', () => { if (conn === c) conn = null; });
+    });
+    peer.on('disconnected', () => peer.reconnect());
+  }
 }
 function joinRoom() {
+  if (typeof mqtt !== 'undefined' && !mq) mq = mqtt.connect(BROKER, { reconnectPeriod: 2000, clean: true });
   if (typeof Peer === 'undefined') return;
   const peer = new Peer();
   peer.on('open', () => {
     const c = peer.connect(ROOM, { reliable: false });
     c.on('open', () => { conn = c; });
-    c.on('close', () => { if (conn === c) conn = null; setTimeout(joinRoom, 1500); peer.destroy(); });
+    c.on('close', () => { if (conn === c) conn = null; peer.destroy(); setTimeout(joinRoom, 1500); });
   });
-  peer.on('error', (e) => { if (e.type === 'peer-unavailable' || e.type === 'network') { peer.destroy(); setTimeout(joinRoom, 2000); } });
+  peer.on('error', (e) => { if (e.type === 'peer-unavailable' || e.type === 'network') { peer.destroy(); setTimeout(joinRoom, 3000); } });
 }
 if (LIVE && ROOM) joinRoom();
 if (!LIVE) hostRoom();
 
-/** 폰 → 데스크톱 한 프레임 상태 */
-function sendState() {
-  if (!conn || !conn.open) return;
-  conn.send({ s: +st.s.toFixed(4), h: st.hits, k: st.k.map((k) => +k.toFixed(3)) });
+/** 폰 → 데스크톱 한 프레임 상태. MQTT 는 1초에 30번만 (공개 브로커라 너무 잦으면 막힐 수 있음) */
+let mqAt = 0;
+function sendState(now) {
+  if (!ROOM) return;
+  const m = { n: ++seq, s: +st.s.toFixed(4), h: st.hits, k: st.k.map((k) => +k.toFixed(3)) };
+  if (conn && conn.open) conn.send(m);
+  if (mq && mq.connected && now - mqAt > 33) { mqAt = now; mq.publish(TOPIC(ROOM), JSON.stringify(m), { qos: 0 }); }
 }
 /** 데스크톱: 받은 상태를 그대로 적용. 착지 횟수가 늘면 그때 원이 튀고 소리 (데스크톱도 한 번 클릭해 두면 소리 남) */
 function applyRemote(now) {
   const m = remote;
-  st.s = m.s;
+  st.s += (m.s - st.s) * 0.45;   // 중계(MQTT)로 오면 1초 30번이라 그 사이를 부드럽게 이음
   for (const i of [0, 1]) if (m.h[i] !== st.hits[i]) {
     const landed = m.h[i] > st.hits[i];
     st.hits[i] = m.h[i]; st.k[i] = m.k[i];
@@ -341,9 +362,13 @@ function frame(now) {
     if (paired) applyRemote(now);
   } else if (Lo) {
     const d = plankDir(Lo);
-    const input = ori && base ? ((ori[0] - base[0]) * d[0] + (ori[1] - base[1]) * d[1]) / CFG.sens : 0;
+    let input = 0;
+    if (ori && base) {
+      const t = tiltOf(ori, base), dx = Math.sign(d[0] || 1) * Math.max(Math.abs(d[0]), CFG.sideways);
+      input = (t[0] * dx + t[1] * d[1]) / CFG.sens;
+    }
     step(dt, Math.max(-1, Math.min(1, input)), now);
-    sendState();
+    sendState(now);
   }
   Lo = draw(now);
   requestAnimationFrame(frame);
