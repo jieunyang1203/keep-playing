@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>keep playing</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400&family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400&family=Bricolage+Grotesque:wght@400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400&display=swap">
 <style>
   /* 영문 PP Radio Grotesk — 무료 개인용 라이선스는 공개 웹사이트 사용·파일 공개 업로드를 금지(EULA 2.1, 2.6)해서
      fonts/ 는 git 에 올리지 않음(.gitignore). 로컬 서버에서만 이 글꼴, GitHub Pages 에서는 Hanken Grotesk 로 대체 */
@@ -62,33 +62,15 @@ const CFG = {
   notes: [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1174.66, 1318.51],
   volume: 0.8,
 
-  /* ── 규칙이 바뀜 ── 착지가 every[0]~every[1] 번 쌓일 때마다 예고 없이 규칙 하나가 다음 값으로 (ruleOrder 순서로 돌아가며) */
+  /* ── 시점이 바뀜 ── 시소 · 조작 · 색은 그대로. 착지가 every[0]~every[1] 번 쌓이면, 닿는 그 순간 다른 도면으로 컷
+     iso 아이소메트릭 · plan 평면도(위에서, 뜬 쪽 그림자가 멀어짐) · elev 입면도(옆에서) */
+  views: ['iso', 'plan', 'elev'],
   every: [5, 9],
-  rules: {
-    pivot: [0, 0.25, -0.25],          // 받침 위치: 판 반 길이의 몇 배만큼 가운데에서 밀려나는지 (긴 쪽이 무거워 저절로 내려감)
-    flip: [1, -1],                    // 기울기 방향: −1 이면 반대로
-    feel: [                           // 무게: 보통 · 묵직하게(느리고 안 튐) · 가볍게(빠르고 통통 튐)
-      { accel: 18, damp: 0.8, restitution: 0.22 },
-      { accel: 8, damp: 2.4, restitution: 0.05 },
-      { accel: 26, damp: 0.5, restitution: 0.55 },
-    ],
-    len: [1.8, 1.25],                 // 판 반 길이 (m)
-  },
-  ruleOrder: ['pivot', 'feel', 'flip', 'len', 'pivot', 'feel', 'len'],
-  bias: 1.2,                // 받침이 밀려났을 때 긴 쪽이 내려가려는 힘
-  /* ── 문장 글꼴 ── 착지 한 번에 글자 하나가 다음 글꼴로 옮겨감. 문장 전체가 다 옮겨가면 그다음 글꼴로 또 한 글자씩
-     (공개 웹에 써도 되는 글꼴만: 전부 Google Fonts OFL. 첫 글꼴만 로컬에서 PP Radio Grotesk) */
-  fonts: [
-    { family: "'PP Radio Grotesk', 'Hanken Grotesk', sans-serif" },
-    { family: "'Instrument Serif', serif" },
-    { family: "'DM Mono', monospace" },
-    { family: "'Instrument Serif', serif", style: 'italic' },
-    { family: "'Bricolage Grotesque', sans-serif" },
-  ],
+  sun: [0.22, 0.85],        // 평면도 그림자: 높이 1 m 마다 그림자가 밀리는 거리 (판 방향, 판과 직각 방향)
   world: 'world-test',      // 모두가 이어서 하는 하나의 게임 — 마지막 착지 횟수를 이 이름으로 남김
 };
 
-const P = 0.55, W_ = 0.26, TH = 0.1;                                    // 받침 높이 · 판 반 폭 · 두께 (m)
+const L = 1.8, P = 0.55, A = Math.asin(P / L), W_ = 0.26, TH = 0.1;   // 판 반 길이 · 받침 높이 · 최대 기울기 · 판 반 폭 · 두께 (m)
 const FW = 0.3, FD = 0.32;                                              // 받침 반 폭 · 반 깊이
 const params = new URLSearchParams(location.search);
 const mobile = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
@@ -137,112 +119,80 @@ function qrColor(bg) {
   return best;
 }
 
-/* ───────── 규칙 ─────────
-   색과 마찬가지로 총 착지 횟수 n 만으로 정해짐 (폰 · 데스크톱 · 다음 사람이 모두 같은 규칙).
-   규칙이 바뀌는 간격도 매번 다름 (every 범위 안에서, 번호로 정해지는 값). 받침 위치 · 판 길이는 부드럽게 옮겨감. */
+/* ───────── 시점 ─────────
+   색과 마찬가지로 총 착지 횟수 n 만으로 정해짐 (폰 · 데스크톱 · 다음 사람이 모두 같은 시점). 바뀌는 간격도, 다음에 올 시점도 매번 다름 */
 const hash = (i) => (Math.imul(i + 1, 2654435761) >>> 0) / 4294967296;
-const eraStart = [0];
-function eraOf(n) {
+const eraStart = [0], eraView = [0];
+function viewAt(n) {
   while (eraStart[eraStart.length - 1] <= n) {
     const i = eraStart.length - 1;
     eraStart.push(eraStart[i] + CFG.every[0] + Math.floor(hash(i) * (CFG.every[1] - CFG.every[0] + 1)));
+    eraView.push((eraView[i] + 1 + Math.floor(hash(i * 7 + 3) * (CFG.views.length - 1))) % CFG.views.length);   // 늘 지금과 다른 시점으로
   }
   let lo = 0, hi = eraStart.length - 1;
   while (hi - lo > 1) { const m = (lo + hi) >> 1; if (eraStart[m] <= n) lo = m; else hi = m; }
-  return lo;
+  return CFG.views[eraView[lo]];
 }
-const ruleCache = [Object.fromEntries(Object.keys(CFG.rules).map((k) => [k, 0]))];
-function rulesAt(n) {
-  const e = eraOf(n);
-  while (ruleCache.length <= e) {
-    const i = ruleCache.length, r = { ...ruleCache[i - 1] }, d = CFG.ruleOrder[(i - 1) % CFG.ruleOrder.length];
-    r[d] = (r[d] + 1) % CFG.rules[d].length;
-    ruleCache.push(r);
-  }
-  const r = ruleCache[e], Lh = CFG.rules.len[r.len];
-  return { Lh, off: CFG.rules.pivot[r.pivot] * Lh, flip: CFG.rules.flip[r.flip], feel: CFG.rules.feel[r.feel] };
-}
-// 지금 적용 중인 규칙. off: 받침이 판 가운데에서 +u 쪽으로 밀려난 거리 (m) · Lh: 판 반 길이
-const cur = { ...rulesAt(0), ready: false };
-function updateRules(dt) {
-  const t = rulesAt(st.hits[0] + st.hits[1]), k = cur.ready ? 1 - Math.exp(-dt * 5) : 1;
-  cur.off += (t.off - cur.off) * k; cur.Lh += (t.Lh - cur.Lh) * k;
-  cur.flip = t.flip; cur.feel = t.feel; cur.ready = true;
-}
-const Apos = () => Math.asin(P / (cur.Lh - cur.off)), Aneg = () => Math.asin(P / (cur.Lh + cur.off));   // +u 끝 · −u 끝이 땅에 닿는 기울기
 
 /* ───────── 장면 좌표 ─────────
    시소는 아이소메트릭 가로 장면으로 그리고, 세로 화면(폰)이면 통째로 돌려 얹음 (판이 수직에서 CFG.lean 만큼 기움).
    데스크톱은 가로로 놓인 원래 장면. */
 const C30 = Math.cos(Math.PI / 6);
 const isoU = (x, y, z) => [(x - y) * C30, (x + y) * 0.5 - z];         // 1 m = 1 단위
-function scenePts(phs) {   // 그리는 것 — 판 · 땅 그림자 · 받침 (주어진 기울기들에서) 의 윤곽 점 (m 단위)
-  const pts = [];
-  for (const x of [-FW, FW]) for (const y of [-FD, FD]) pts.push(isoU(x, y, 0));
+// 도면마다: 3D(m) → 화면 단위. turn = 세로 화면에서 판이 늘 같은 방향(수직에서 lean)으로 놓이게 더 돌리는 각 (아이소는 판이 이미 30° 누워 있음)
+const VIEWS = {
+  iso: { proj: isoU, turn: 0 },
+  plan: { proj: (x, y, z) => [x, y], turn: 30, fill: 0.84 },          // fill: 위에서 보면 판이 큰 면이라 조금 작게
+  elev: { proj: (x, y, z) => [x, -z], turn: 30, clearQR: true },       // 데스크톱: 닿은 끝이 QR 자리와 겹치지 않게 위로
+};
+const GL = 0.07;                                                       // 입면도 땅 그림자 띠 두께 (m)
+const sunPt = (x, y, z) => [x + z * CFG.sun[0], y + z * CFG.sun[1], 0];   // 평면도: 높이 z 인 점의 그림자가 땅에 떨어지는 곳
+function scenePts(vn, phs) {   // 그리는 것 — 판 · 땅 그림자 · 받침 (주어진 기울기들에서) 의 윤곽 점 (m 단위)
+  const pr = VIEWS[vn].proj, pts = [];
+  for (const x of [-FW * 1.25, FW * 1.25]) for (const y of [-FD * 1.1, FD * 1.1]) pts.push(pr(x, y, 0));
+  pts.push(pr(0, 0, P));
   for (const ph of phs) {
     const c = Math.cos(ph), sn = Math.sin(ph);
-    const Bm = (u, y, z) => isoU((u - cur.off) * c + z * sn, y, P - (u - cur.off) * sn + z * c);
-    for (const u of [-cur.Lh, cur.Lh]) for (const y of [-W_, W_]) {
-      for (const z of [0, TH + 0.04]) pts.push(Bm(u, y, z));
-      pts.push(isoU((u - cur.off) * c, y, 0));
+    const Wd = (u, y, z) => [u * c + z * sn, y, P - u * sn + z * c];
+    for (const u of [-L, L]) for (const y of [-W_, W_]) {
+      for (const z of [0, TH + 0.04]) pts.push(pr(...Wd(u, y, z)));
+      if (vn === 'iso') pts.push(pr(u * c, y, 0));
+      if (vn === 'plan') pts.push(pr(...sunPt(...Wd(u, y, 0))));
+      if (vn === 'elev') pts.push(pr(u * c, y, -GL));
     }
   }
   return pts;
 }
+const allPts = {}, levelPts = {};
+for (const vn of Object.keys(VIEWS)) { allPts[vn] = scenePts(vn, [-A, 0, A]); levelPts[vn] = scenePts(vn, [0]); }
 const turn = (q, th) => [q[0] * Math.cos(th) - q[1] * Math.sin(th), q[0] * Math.sin(th) + q[1] * Math.cos(th)];
 const box = (pts) => {
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
   return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
 };
 
-/* 문장: 데스크톱만. 화면 맨 위에 붙여 한 줄로, 좌우 끝까지 (폰은 시소만).
-   착지 한 번에 글자 하나가 다음 글꼴로 옮겨감 — 한 번에 섞이는 글꼴은 늘 이웃한 둘뿐. 글꼴마다 x-높이를 첫 글꼴에 맞춤 */
-const CH = [...CFG.caption], LETTERS = CH.map((c, i) => (c === ' ' ? -1 : i)).filter((i) => i >= 0);
-const fontStr = (f, sz) => `${CFG.fonts[f].style || ''} 400 ${sz * (CFG.fonts[f].k || 1)}px ${CFG.fonts[f].family}`;
-let fontRef = null;   // 글꼴이 다 불린 뒤 한 번: x-높이 맞춤 · 가장 높은 글자 · 한 글꼴로만 짰을 때 가장 좁은 폭
-function measureFonts() {
-  const xh = CFG.fonts.map((f, i) => { ctx.font = fontStr(i, 100); return ctx.measureText('x').actualBoundingBoxAscent || 50; });
-  CFG.fonts.forEach((f, i) => { f.k = Math.min(1.3, Math.max(0.77, xh[0] / xh[i])); });
-  let asc = 0, desc = 0, minW = Infinity;
-  CFG.fonts.forEach((f, i) => {
-    ctx.font = fontStr(i, 100);
-    const t = ctx.measureText(CFG.caption);
-    asc = Math.max(asc, t.actualBoundingBoxAscent); desc = Math.max(desc, t.actualBoundingBoxDescent); minW = Math.min(minW, t.width);
-  });
-  fontRef = { asc, desc, minW };
-}
-const orderCache = {};
-function letterFonts(n) {   // 글자마다 글꼴 번호
-  const M = LETTERS.length, F = CFG.fonts.length, pass = Math.floor(n / M), r = n % M;
-  const ord = orderCache[pass] || (orderCache[pass] = LETTERS.map((i, j) => [hash(pass * 97 + j * 13 + 5), i]).sort((a, b) => a[0] - b[0]).map((q) => q[1]));
-  const moved = new Set(ord.slice(0, r));
-  let prev = pass % F;
-  return CH.map((c, i) => (c === ' ' ? prev : (prev = (pass + (moved.has(i) ? 1 : 0)) % F)));
-}
-let capCache = null;
-function captionLayout(n) {
+/* 문장: 데스크톱만. 화면 맨 위에 붙여 한 줄로, 좌우·위 여백이 거의 같게 (폰은 시소만) */
+function captionLayout() {
   if (LIVE) return null;
-  if (!fontRef) measureFonts();
-  if (capCache && capCache.n === n && capCache.cw === cw) return capCache;
-  const m = Math.max(12, cw * 0.022), fonts = letterFonts(n), runs = [];   // 위 · 좌우 여백
-  CH.forEach((c, i) => { const last = runs[runs.length - 1]; if (last && last.f === fonts[i]) last.text += c; else runs.push({ f: fonts[i], text: c }); });
-  let w = 0;
-  for (const r of runs) { ctx.font = fontStr(r.f, 100); r.w = ctx.measureText(r.text).width; w += r.w; }
-  const sz = (cw - 2 * m) / (w / 100), maxSz = (cw - 2 * m) / (fontRef.minW / 100);
-  // 시소 자리는 글자가 가장 클 때(가장 좁은 글꼴) 기준으로 고정 — 글꼴이 섞여 글자 크기가 달라져도 시소는 안 흔들림
-  return (capCache = { n, cw, runs, sz, x: m, y: m + fontRef.asc * sz / 100, bottom: m + (fontRef.asc + fontRef.desc) * maxSz / 100 });
+  const font = (sz) => `400 ${sz}px ${getComputedStyle(document.body).getPropertyValue('--font')}`;
+  const m = Math.max(12, cw * 0.022);                                     // 위 · 좌우 여백
+  ctx.font = font(100);
+  const mt = ctx.measureText(CFG.caption), sz = (cw - 2 * m) / (mt.width / 100);
+  ctx.font = font(sz);
+  const t = ctx.measureText(CFG.caption);
+  // 글자 윗면(대문자 T 꼭대기)을 여백 m 에 맞춤
+  return { font: font(sz), x: cw / 2, y: m + t.actualBoundingBoxAscent, bottom: m + t.actualBoundingBoxAscent + t.actualBoundingBoxDescent };
 }
 
-function layout(cap) {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 원점 + U × turn(장면 좌표))
-  const th = ch > cw ? Math.PI / 2 - (30 - CFG.lean) * Math.PI / 180 : 0;
-  const allPts = scenePts([-Aneg(), 0, Apos()]), levelPts = scenePts([0]);   // 규칙(받침 위치 · 판 길이)이 바뀌면 다시 맞춤
-  const all = box(allPts.map((q) => turn(q, th))), lv = box(levelPts.map((q) => turn(q, th)));
+function layout(cap, vn) {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 원점 + U × turn(장면 좌표))
+  const th = ch > cw ? Math.PI / 2 - (30 - CFG.lean - VIEWS[vn].turn) * Math.PI / 180 : 0;
+  const all = box(allPts[vn].map((q) => turn(q, th))), lv = box(levelPts[vn].map((q) => turn(q, th)));
   // 가운데 = 수평일 때 상자의 중심. 크기 = 그 중심에서 양쪽 끝까지 기울였을 때 가장 먼 곳까지가 남은 영역 안에 들도록
-  const top = cap ? cap.bottom + ch * 0.02 : 56, bottom = LIVE ? 84 : ch * 0.03;   // 폰: 위 다이내믹 아일랜드 · 아래 'tap to play' 자리
+  const top = cap ? cap.bottom + ch * 0.02 : 56, bottom = LIVE ? 84 : VIEWS[vn].clearQR ? 190 : ch * 0.03;   // 폰: 위 다이내믹 아일랜드 · 아래 'tap to play' 자리
   const aw = cw, ah = ch - top - bottom;
   const mx = (lv.x0 + lv.x1) / 2, my = (lv.y0 + lv.y1) / 2;
   const hw = Math.max(mx - all.x0, all.x1 - mx), hh = Math.max(my - all.y0, all.y1 - my);
-  const f = LIVE ? CFG.fill : CFG.fillDesk;
+  const f = (LIVE ? CFG.fill : CFG.fillDesk) * (VIEWS[vn].fill || 1);
   if (!LIVE) {   // 데스크톱: 세로는 양쪽 끝까지 기울인 전체 범위의 가운데에 (수평 중심 기준이면 위가 꽉 차고 아래가 남음)
     const U = Math.min(aw * f / (2 * hw), ah * f / (all.y1 - all.y0));
     return { th, U, ox: aw / 2 - mx * U, oy: top + ah / 2 - (all.y0 + all.y1) / 2 * U };
@@ -257,9 +207,8 @@ function layout(cap) {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 
 const st = { s: 1, v: 0, hits: [0, 0], k: [0, 0], armed: [true, true] };   // hits[0] 왼쪽, [1] 오른쪽 · k 착지 세기 0…1
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
 function step(dt, input, now) {
-  // 규칙: 방향 뒤집힘 · 받침이 밀려나 긴 쪽(−off 쪽)이 저절로 내려감 · 무게 · 짧은 판은 더 빨리 넘어감
-  const g = (Math.abs(input) < CFG.dead ? 0 : input) * cur.flip - cur.off / cur.Lh * CFG.bias;
-  st.v += (cur.feel.accel * (1.8 / cur.Lh) * g - cur.feel.damp * st.v) * dt;
+  const g = Math.abs(input) < CFG.dead ? 0 : input;
+  st.v += (CFG.accel * g - CFG.damp * st.v) * dt;
   st.s += st.v * dt;
   if (st.s < 0.5) st.armed[0] = true;   // 반 넘게 떠났다 와야 다음 착지로 셈 (튕겼다 다시 떨어지는 건 안 셈)
   if (st.s > -0.5) st.armed[1] = true;
@@ -275,7 +224,7 @@ function step(dt, input, now) {
         if (LIVE && navigator.vibrate) navigator.vibrate(Math.round(8 + 22 * k));
         publishWorld();
       }
-      st.v = imp > 0.9 ? -st.v * cur.feel.restitution : 0;
+      st.v = imp > 0.9 ? -st.v * CFG.restitution : 0;
     }
   }
 }
@@ -317,7 +266,7 @@ function sound(i, k, ci) {
 
 /* 기울기 입력: 시작 자세에서 기운 정도를 판 방향(화면에서 오른쪽 끝 → 왼쪽 끝)에 투영 */
 function plankDir(Lo) {
-  const a = turn(isoU(-1, 0, P), Lo.th), b = turn(isoU(1, 0, P), Lo.th);
+  const pr = VIEWS[Lo.vn].proj, a = turn(pr(-1, 0, P), Lo.th), b = turn(pr(1, 0, P), Lo.th);
   const dx = a[0] - b[0], dy = a[1] - b[1], n = Math.hypot(dx, dy) || 1;
   return [dx / n, dy / n];
 }
@@ -335,40 +284,50 @@ function draw(now) {
     const s = document.documentElement.style;
     s.setProperty('--bg', bg); s.setProperty('--text', text); s.setProperty('--qr', qrColor(bg));
   }
-  const cap = captionLayout(n), Lo = layout(cap);
+  const vn = viewAt(n), cap = captionLayout(), Lo = layout(cap, vn); Lo.vn = vn;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = bg; ctx.fillRect(0, 0, cw, ch);
 
   ctx.save();
   ctx.translate(Lo.ox, Lo.oy); ctx.rotate(Lo.th);
   const U = Lo.U;
-  const iso = (x, y, z) => { const q = isoU(x, y, z); return [q[0] * U, q[1] * U]; };
-  const phi = st.s * (st.s >= 0 ? Apos() : Aneg()), L = cur.Lh, o = cur.off;
+  const pr = VIEWS[vn].proj;
+  const iso = (x, y, z) => { const q = pr(x, y, z); return [q[0] * U, q[1] * U]; };   // 지금 도면으로 3D → 화면
+  const phi = st.s * A;
   const c = Math.cos(phi), sn = Math.sin(phi);
-  const B = (u, y, z) => iso((u - o) * c + z * sn, y, P - (u - o) * sn + z * c);   // 판 좌표 → 화면 (u 판 길이, z 판 두께, 받침은 u = o 에)
+  const Wd = (u, y, z) => [u * c + z * sn, y, P - u * sn + z * c];     // 판 좌표 (u 판 길이, z 판 두께) → 3D
+  const B = (u, y, z) => iso(...Wd(u, y, z));
   const poly = (pts, col) => { ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.closePath(); ctx.fillStyle = col; ctx.fill(); };
 
-  // 땅 그림자: 판을 바로 아래 땅에 눌러 놓은 모양 + 받침 발치 (팔레트 색)
-  poly([iso((-L - o) * c, -W_, 0), iso((L - o) * c, -W_, 0), iso((L - o) * c, W_, 0), iso((-L - o) * c, W_, 0)], shadowC);
-  poly([iso(-FW * 1.25, -FD * 1.1, 0), iso(FW * 1.25, -FD * 1.1, 0), iso(FW * 1.25, FD * 1.1, 0), iso(-FW * 1.25, FD * 1.1, 0)], shadowC);
-
-  // 받침: 삼각 기둥 — 면 사이 명암은 아주 조금만 (플랫하게, 형태만 읽히게)
-  poly([iso(-FW, -FD, 0), iso(0, -FD, P), iso(0, FD, P), iso(-FW, FD, 0)], base);
-  poly([iso(FW, -FD, 0), iso(0, -FD, P), iso(0, FD, P), iso(FW, FD, 0)], shade(base, 0.93));
-  poly([iso(-FW, FD, 0), iso(0, FD, P), iso(FW, FD, 0)], shade(base, 0.86));
-
-  // 판: 앞 옆면 · 오른쪽 끝면 · 윗면 (손잡이 · 좌석은 뺌)
-  poly([B(-L, W_, 0), B(L, W_, 0), B(L, W_, TH), B(-L, W_, TH)], shade(plank, 0.88));
-  poly([B(L, -W_, 0), B(L, W_, 0), B(L, W_, TH), B(L, -W_, TH)], shade(plank, 0.82));
-  poly([B(-L, -W_, TH), B(L, -W_, TH), B(L, W_, TH), B(-L, W_, TH)], plank);
+  if (vn === 'iso') {
+    // 땅 그림자: 판을 바로 아래 땅에 눌러 놓은 모양 + 받침 발치 (팔레트 색)
+    poly([iso(-L * c, -W_, 0), iso(L * c, -W_, 0), iso(L * c, W_, 0), iso(-L * c, W_, 0)], shadowC);
+    poly([iso(-FW * 1.25, -FD * 1.1, 0), iso(FW * 1.25, -FD * 1.1, 0), iso(FW * 1.25, FD * 1.1, 0), iso(-FW * 1.25, FD * 1.1, 0)], shadowC);
+    // 받침: 삼각 기둥 — 면 사이 명암은 아주 조금만 (플랫하게, 형태만 읽히게)
+    poly([iso(-FW, -FD, 0), iso(0, -FD, P), iso(0, FD, P), iso(-FW, FD, 0)], base);
+    poly([iso(FW, -FD, 0), iso(0, -FD, P), iso(0, FD, P), iso(FW, FD, 0)], shade(base, 0.93));
+    poly([iso(-FW, FD, 0), iso(0, FD, P), iso(FW, FD, 0)], shade(base, 0.86));
+    // 판: 앞 옆면 · 오른쪽 끝면 · 윗면
+    poly([B(-L, W_, 0), B(L, W_, 0), B(L, W_, TH), B(-L, W_, TH)], shade(plank, 0.88));
+    poly([B(L, -W_, 0), B(L, W_, 0), B(L, W_, TH), B(L, -W_, TH)], shade(plank, 0.82));
+    poly([B(-L, -W_, TH), B(L, -W_, TH), B(L, W_, TH), B(-L, W_, TH)], plank);
+  } else if (vn === 'plan') {
+    // 평면도: 위에서 본 판(긴 네모) 과 받침. 움직임은 그림자로 읽힘 — 뜬 끝의 그림자는 멀어지고, 닿은 끝은 판에 붙음
+    const S = (x, y, z) => iso(...sunPt(x, y, z));
+    poly([S(...Wd(-L, -W_, 0)), S(...Wd(L, -W_, 0)), S(...Wd(L, W_, 0)), S(...Wd(-L, W_, 0))], shadowC);
+    poly([iso(-FW, -FD, 0), iso(0, -FD, 0), iso(0, FD, 0), iso(-FW, FD, 0)], base);
+    poly([iso(FW, -FD, 0), iso(0, -FD, 0), iso(0, FD, 0), iso(FW, FD, 0)], shade(base, 0.93));
+    poly([B(-L, -W_, TH), B(L, -W_, TH), B(L, W_, TH), B(-L, W_, TH)], plank);
+  } else {
+    // 입면도: 옆에서 본 판(얇은 막대) · 받침(세모) · 땅에 깔린 그림자 띠
+    poly([iso(-L * c, 0, 0), iso(L * c, 0, 0), iso(L * c, 0, -GL), iso(-L * c, 0, -GL)], shadowC);
+    poly([iso(-FW, 0, 0), iso(0, 0, P), iso(FW, 0, 0)], base);
+    poly([B(-L, 0, 0), B(L, 0, 0), B(L, 0, TH), B(-L, 0, TH)], plank);
+  }
   ctx.restore();
 
   // 문장 — 데스크톱만, 화면 맨 위
-  if (cap) {
-    ctx.fillStyle = text; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-    let x = cap.x;
-    for (const r of cap.runs) { ctx.font = fontStr(r.f, cap.sz); ctx.fillText(r.text, x, cap.y); x += r.w * cap.sz / 100; }
-  }
+  if (cap) { ctx.font = cap.font; ctx.fillStyle = text; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.fillText(CFG.caption, cap.x, cap.y); }
   return Lo;
 }
 
@@ -408,7 +367,7 @@ if (LIVE) {
   canvas.addEventListener('dblclick', () => { base = null; });   // 두 번 탭: 지금 자세를 다시 0 으로
 }
 
-// 데스크톱에서 ?live 로 볼 때: ← → 키로 기울임 (폰 없이 규칙을 쳐 보는 용)
+// 데스크톱에서 ?live 로 볼 때: ← → 키로 기울임 (폰 없이 쳐 보는 용)
 let keyIn = 0;
 addEventListener('keydown', (e) => { if (e.key === 'ArrowLeft') keyIn = 1; if (e.key === 'ArrowRight') keyIn = -1; });
 addEventListener('keyup', (e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') keyIn = 0; });
@@ -430,11 +389,11 @@ function receive(m) {
   lastSeq = m.n; remote = m; remoteAt = performance.now();
 }
 /* ───────── 하나의 게임 ─────────
-   마지막 착지 횟수를 브로커에 '남겨 두는 메시지'(retain)로 올림. 누가 열든 거기서부터 이어서 함 (색 · 규칙 · 글꼴이 모두 횟수로 정해지므로).
+   마지막 착지 횟수를 브로커에 '남겨 두는 메시지'(retain)로 올림. 누가 열든 거기서부터 이어서 함 (색 · 시점이 모두 횟수로 정해지므로).
    동시에 여러 사람이 하면 더 큰 횟수를 따라감. ?n=숫자 로 열면 그 횟수에서 혼자 시작 (남기지도 받지도 않음 — 미리 보기용) */
 const FIXED_N = params.has('n') ? Math.max(0, parseInt(params.get('n'), 10) || 0) : null;
 const WORLD = TOPIC(CFG.world);
-let worldN = -1;
+let worldN = -1, hostId = null;
 function ensureMq() {
   if (mq || typeof mqtt === 'undefined') return mq;
   mq = mqtt.connect(BROKER, { reconnectPeriod: 2000, clean: true });
@@ -449,7 +408,7 @@ function ensureMq() {
     const h = [m.h[0] | 0, m.h[1] | 0], n = h[0] + h[1];
     worldN = Math.max(worldN, n);
     const paired = remote && performance.now() - remoteAt < 1500;
-    if (n > st.hits[0] + st.hits[1] && (LIVE || !paired)) { st.hits = h; if (!cur.ready || !LIVE) cur.ready = false; }
+    if (n > st.hits[0] + st.hits[1] && (LIVE || !paired)) st.hits = h;
   });
   return mq;
 }
@@ -458,7 +417,6 @@ function publishWorld() {
   worldN = Math.max(worldN, st.hits[0] + st.hits[1]);
   mq.publish(WORLD, JSON.stringify({ h: st.hits }), { qos: 1, retain: true });
 }
-let hostId = null;
 if (FIXED_N != null) st.hits = [Math.ceil(FIXED_N / 2), Math.floor(FIXED_N / 2)];
 function hostRoom() {
   const r = Math.random().toString(36).slice(2, 6), id = 'keepplaying-' + r;
@@ -518,7 +476,6 @@ let last = performance.now(), Lo = null;
 function frame(now) {
   const dt = Math.min(0.033, (now - last) / 1000); last = now;
   if (!cw) resize();
-  updateRules(dt);
   if (!LIVE) {   // mirror: 폰이 보내는 동안만 움직이고, 아니면 그 자리에 멈춰 있음
     const paired = remote && now - remoteAt < 1500;
     document.body.classList.toggle('paired', !!paired);
@@ -539,10 +496,6 @@ function frame(now) {
 Promise.all([
   document.fonts.load("400 24px 'PP Radio Grotesk'").catch(() => {}),
   document.fonts.load("400 24px 'Hanken Grotesk'").catch(() => {}),
-  document.fonts.load("400 24px 'Instrument Serif'").catch(() => {}),
-  document.fonts.load("italic 400 24px 'Instrument Serif'").catch(() => {}),
-  document.fonts.load("400 24px 'DM Mono'").catch(() => {}),
-  document.fonts.load("400 24px 'Bricolage Grotesque'").catch(() => {}),
 ]).then(() => { resize(); requestAnimationFrame(frame); });
 </script>
 </body>
