@@ -19,7 +19,7 @@
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; background: var(--bg); overflow: hidden; }
   body { font-family: var(--font); -webkit-user-select: none; user-select: none; }
-  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
+  canvas { position: fixed; left: 0; top: 0; display: block; width: 100vw; height: 100vh; height: 100dvh; }   /* #gl 3D 장면 · 그 위 #c 문장 */
 
   .start { position: fixed; inset: 0; display: none; place-items: end center; padding-bottom: calc(36px + env(safe-area-inset-bottom));
            font-size: 24px; letter-spacing: -0.01em; color: var(--text); background: transparent; border: 0; font-family: var(--font); }
@@ -32,9 +32,11 @@
 </style>
 </head>
 <body>
+<canvas id="gl"></canvas>
 <canvas id="c"></canvas>
 <button class="start" id="start" type="button">tap to play</button>
 <div class="qr" id="qr"></div>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
@@ -62,12 +64,15 @@ const CFG = {
   notes: [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1174.66, 1318.51],
   volume: 0.8,
 
-  /* ── 시점이 바뀜 ── 시소 · 조작 · 색은 그대로. 착지가 every[0]~every[1] 번 쌓이면, 닿는 그 순간 다른 도면으로 컷
-     iso 아이소메트릭 · plan 평면도(위에서, 뜬 쪽 그림자가 멀어짐) · elev 입면도(옆에서) */
-  views: ['iso', 'plan', 'elev'],
-  every: [5, 9],
-  sun: [0.22, 0.85],        // 평면도 그림자: 높이 1 m 마다 그림자가 밀리는 거리 (판 방향, 판과 직각 방향)
-  world: 'world-test',      // 모두가 이어서 하는 하나의 게임 — 마지막 착지 횟수를 이 이름으로 남김
+  /* ── 3D (three.js) ── 진짜 조명 · 그림자 · 원근. 물리 · 소리 · 색 · 연결은 그대로, 그리는 부분만 3D */
+  fov: 30,                              // 화각 (°) — 클수록 원근이 세짐
+  camDesk: [0.75, 1.5, 0.72],           // 데스크톱: 카메라가 있는 방향 (x 판 길이 · y 앞쪽 · z 위)
+  camPhone: [1, 0.34, 0.62],            // 폰: 판의 한쪽 끝 위에서 내려다봄 — 판이 화면 아래에서 위로 멀어짐
+  sway: 0.75, swayMax: 0.1,             // 폰을 기울이면 카메라도 같이 살짝 돎: 기울기 대비 세기 · 최대 (rad, 0.1 ≈ 6°)
+  light: { sky: 1.5, key: 1.95, from: [-1.3, -2, 6] },     // 은은한 전체 빛 · 그림자를 만드는 빛 세기 · 그 빛이 오는 곳
+  shadow: 0.4,                          // 땅 그림자 진하기
+  rough: 0.5,                           // 표면 거칠기 (0 반짝 … 1 무광)
+  world: 'world-test',                  // 모두가 이어서 하는 하나의 게임 — 마지막 착지 횟수를 이 이름으로 남김
 };
 
 const L = 1.8, P = 0.55, A = Math.asin(P / L), W_ = 0.26, TH = 0.1;   // 판 반 길이 · 받침 높이 · 최대 기울기 · 판 반 폭 · 두께 (m)
@@ -84,6 +89,7 @@ function resize() {
   dpr = Math.min(3, window.devicePixelRatio || 1);
   cw = r.width; ch = r.height;
   canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr);
+  if (R3) { R3.renderer.setPixelRatio(Math.min(2, dpr)); R3.renderer.setSize(cw, ch, false); R3.fitKey = ''; }
 }
 addEventListener('resize', resize);
 
@@ -119,52 +125,25 @@ function qrColor(bg) {
   return best;
 }
 
-/* ───────── 시점 ─────────
-   색과 마찬가지로 총 착지 횟수 n 만으로 정해짐 (폰 · 데스크톱 · 다음 사람이 모두 같은 시점). 바뀌는 간격도, 다음에 올 시점도 매번 다름 */
-const hash = (i) => (Math.imul(i + 1, 2654435761) >>> 0) / 4294967296;
-const eraStart = [0], eraView = [0];
-function viewAt(n) {
-  while (eraStart[eraStart.length - 1] <= n) {
-    const i = eraStart.length - 1;
-    eraStart.push(eraStart[i] + CFG.every[0] + Math.floor(hash(i) * (CFG.every[1] - CFG.every[0] + 1)));
-    eraView.push((eraView[i] + 1 + Math.floor(hash(i * 7 + 3) * (CFG.views.length - 1))) % CFG.views.length);   // 늘 지금과 다른 시점으로
-  }
-  let lo = 0, hi = eraStart.length - 1;
-  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (eraStart[m] <= n) lo = m; else hi = m; }
-  return CFG.views[eraView[lo]];
-}
-
 /* ───────── 장면 좌표 ─────────
    시소는 아이소메트릭 가로 장면으로 그리고, 세로 화면(폰)이면 통째로 돌려 얹음 (판이 수직에서 CFG.lean 만큼 기움).
    데스크톱은 가로로 놓인 원래 장면. */
 const C30 = Math.cos(Math.PI / 6);
 const isoU = (x, y, z) => [(x - y) * C30, (x + y) * 0.5 - z];         // 1 m = 1 단위
-// 도면마다: 3D(m) → 화면 단위. turn = 세로 화면에서 판이 늘 같은 방향(수직에서 lean)으로 놓이게 더 돌리는 각 (아이소는 판이 이미 30° 누워 있음)
-const VIEWS = {
-  iso: { proj: isoU, turn: 0 },
-  plan: { proj: (x, y, z) => [x, y], turn: 30, fill: 0.84 },          // fill: 위에서 보면 판이 큰 면이라 조금 작게
-  elev: { proj: (x, y, z) => [x, -z], turn: 30, clearQR: true },       // 데스크톱: 닿은 끝이 QR 자리와 겹치지 않게 위로
-};
-const GL = 0.07;                                                       // 입면도 땅 그림자 띠 두께 (m)
-const sunPt = (x, y, z) => [x + z * CFG.sun[0], y + z * CFG.sun[1], 0];   // 평면도: 높이 z 인 점의 그림자가 땅에 떨어지는 곳
-function scenePts(vn, phs) {   // 그리는 것 — 판 · 땅 그림자 · 받침 (주어진 기울기들에서) 의 윤곽 점 (m 단위)
-  const pr = VIEWS[vn].proj, pts = [];
-  for (const x of [-FW * 1.25, FW * 1.25]) for (const y of [-FD * 1.1, FD * 1.1]) pts.push(pr(x, y, 0));
-  pts.push(pr(0, 0, P));
+function scenePts(phs) {   // 그리는 것 — 판 · 땅 그림자 · 받침 (주어진 기울기들에서) 의 윤곽 점 (m 단위)
+  const pts = [];
+  for (const x of [-FW, FW]) for (const y of [-FD, FD]) pts.push(isoU(x, y, 0));
   for (const ph of phs) {
     const c = Math.cos(ph), sn = Math.sin(ph);
-    const Wd = (u, y, z) => [u * c + z * sn, y, P - u * sn + z * c];
+    const Bm = (u, y, z) => isoU(u * c + z * sn, y, P - u * sn + z * c);
     for (const u of [-L, L]) for (const y of [-W_, W_]) {
-      for (const z of [0, TH + 0.04]) pts.push(pr(...Wd(u, y, z)));
-      if (vn === 'iso') pts.push(pr(u * c, y, 0));
-      if (vn === 'plan') pts.push(pr(...sunPt(...Wd(u, y, 0))));
-      if (vn === 'elev') pts.push(pr(u * c, y, -GL));
+      for (const z of [0, TH + 0.04]) pts.push(Bm(u, y, z));
+      pts.push(isoU(u * c, y, 0));
     }
   }
   return pts;
 }
-const allPts = {}, levelPts = {};
-for (const vn of Object.keys(VIEWS)) { allPts[vn] = scenePts(vn, [-A, 0, A]); levelPts[vn] = scenePts(vn, [0]); }
+const allPts = scenePts([-A, 0, A]), levelPts = scenePts([0]);
 const turn = (q, th) => [q[0] * Math.cos(th) - q[1] * Math.sin(th), q[0] * Math.sin(th) + q[1] * Math.cos(th)];
 const box = (pts) => {
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
@@ -184,15 +163,15 @@ function captionLayout() {
   return { font: font(sz), x: cw / 2, y: m + t.actualBoundingBoxAscent, bottom: m + t.actualBoundingBoxAscent + t.actualBoundingBoxDescent };
 }
 
-function layout(cap, vn) {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 원점 + U × turn(장면 좌표))
-  const th = ch > cw ? Math.PI / 2 - (30 - CFG.lean - VIEWS[vn].turn) * Math.PI / 180 : 0;
-  const all = box(allPts[vn].map((q) => turn(q, th))), lv = box(levelPts[vn].map((q) => turn(q, th)));
+function layout(cap) {   // 회전 각 · 1 m 픽셀 · 원점 (화면 좌표 = 원점 + U × turn(장면 좌표))
+  const th = ch > cw ? Math.PI / 2 - (30 - CFG.lean) * Math.PI / 180 : 0;
+  const all = box(allPts.map((q) => turn(q, th))), lv = box(levelPts.map((q) => turn(q, th)));
   // 가운데 = 수평일 때 상자의 중심. 크기 = 그 중심에서 양쪽 끝까지 기울였을 때 가장 먼 곳까지가 남은 영역 안에 들도록
-  const top = cap ? cap.bottom + ch * 0.02 : 56, bottom = LIVE ? 84 : VIEWS[vn].clearQR ? 190 : ch * 0.03;   // 폰: 위 다이내믹 아일랜드 · 아래 'tap to play' 자리
+  const top = cap ? cap.bottom + ch * 0.02 : 56, bottom = LIVE ? 84 : ch * 0.03;   // 폰: 위 다이내믹 아일랜드 · 아래 'tap to play' 자리
   const aw = cw, ah = ch - top - bottom;
   const mx = (lv.x0 + lv.x1) / 2, my = (lv.y0 + lv.y1) / 2;
   const hw = Math.max(mx - all.x0, all.x1 - mx), hh = Math.max(my - all.y0, all.y1 - my);
-  const f = (LIVE ? CFG.fill : CFG.fillDesk) * (VIEWS[vn].fill || 1);
+  const f = LIVE ? CFG.fill : CFG.fillDesk;
   if (!LIVE) {   // 데스크톱: 세로는 양쪽 끝까지 기울인 전체 범위의 가운데에 (수평 중심 기준이면 위가 꽉 차고 아래가 남음)
     const U = Math.min(aw * f / (2 * hw), ah * f / (all.y1 - all.y0));
     return { th, U, ox: aw / 2 - mx * U, oy: top + ah / 2 - (all.y0 + all.y1) / 2 * U };
@@ -265,70 +244,92 @@ function sound(i, k, ci) {
 }
 
 /* 기울기 입력: 시작 자세에서 기운 정도를 판 방향(화면에서 오른쪽 끝 → 왼쪽 끝)에 투영 */
-function plankDir(Lo) {
-  const pr = VIEWS[Lo.vn].proj, a = turn(pr(-1, 0, P), Lo.th), b = turn(pr(1, 0, P), Lo.th);
-  const dx = a[0] - b[0], dy = a[1] - b[1], n = Math.hypot(dx, dy) || 1;
-  return [dx / n, dy / n];
-}
+const plankDir = (Lo) => Lo.d;   // 카메라로 본 판의 화면 방향 (fit3 에서 계산)
 // 화면 좌표계에서 본 기울기 (x 오른쪽, y 아래쪽). sin(beta) 를 그대로 쓰면 폰을 세워 들었을 때 거의 안 변해서 각도 차이로
 const wrap = (a) => ((a + 540) % 360) - 180;
 const tiltOf = (o, b) => [Math.sin(wrap(o.gamma - b.gamma) * Math.PI / 180), Math.sin(wrap(o.beta - b.beta) * Math.PI / 180)];
 
 /* ───────── 그리기 — 아이소메트릭 면을 색으로 채움 (선 없음). 윗면 = 요소 색, 옆면은 같은 색을 어둡게 ───────── */
-let shownN = -1;
+let shownN = -1, R3 = null;
+const TH3 = 0.13, BEV = 0.022;                                     // 3D 판 두께 · 모서리 둥글림 (m)
+const sway = [0, 0], swayTo = [0, 0];                              // 카메라가 옆 · 위로 돌아간 정도 (지금 / 목표)
+function init3() {
+  const T = THREE, renderer = new T.WebGLRenderer({ canvas: document.getElementById('gl'), antialias: true });
+  renderer.shadowMap.enabled = true; renderer.shadowMap.type = T.PCFSoftShadowMap;
+  const scene = new T.Scene(), camera = new T.PerspectiveCamera(CFG.fov, 1, 0.1, 300);
+  camera.up.set(0, 0, 1);                                          // z 가 위
+  const hemi = new T.HemisphereLight(0xffffff, 0xffffff, CFG.light.sky); hemi.position.set(0, 0, 1); scene.add(hemi);
+  const key = new T.DirectionalLight(0xffffff, CFG.light.key); key.position.set(...CFG.light.from); key.castShadow = true;
+  Object.assign(key.shadow.camera, { left: -4.5, right: 4.5, top: 4.5, bottom: -4.5, near: 0.5, far: 20 });
+  key.shadow.mapSize.set(2048, 2048); key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02; scene.add(key);
+  // 땅: 색은 없고 그림자만 받음 → 바탕은 페이지 색 그대로 평평하게
+  const shadowMat = new T.ShadowMaterial({ opacity: CFG.shadow });
+  const ground = new T.Mesh(new T.PlaneGeometry(80, 80), shadowMat); ground.receiveShadow = true; scene.add(ground);
+  const mat = () => new T.MeshStandardMaterial({ roughness: CFG.rough, metalness: 0 });
+  // 판: 모서리를 살짝 굴린 긴 판. 받침 꼭대기(높이 P)를 축으로 돎
+  const rr = (w, h, r) => { const sh = new T.Shape(); sh.moveTo(-w + r, -h); sh.lineTo(w - r, -h); sh.quadraticCurveTo(w, -h, w, -h + r); sh.lineTo(w, h - r); sh.quadraticCurveTo(w, h, w - r, h); sh.lineTo(-w + r, h); sh.quadraticCurveTo(-w, h, -w, h - r); sh.lineTo(-w, -h + r); sh.quadraticCurveTo(-w, -h, -w + r, -h); return sh; };
+  const bevel = { bevelEnabled: true, bevelThickness: BEV, bevelSize: BEV, bevelSegments: 5, curveSegments: 10 };
+  const plankGeo = new T.ExtrudeGeometry(rr(L - BEV, W_ - BEV, 0.06), { depth: TH3 - 2 * BEV, ...bevel }); plankGeo.translate(0, 0, BEV);
+  const plankMat = mat(), plank = new T.Mesh(plankGeo, plankMat); plank.castShadow = plank.receiveShadow = true;
+  const pivot = new T.Group(); pivot.position.set(0, 0, P); pivot.add(plank); scene.add(pivot);
+  // 받침: 삼각 기둥
+  const tri = new T.Shape(), H = P - 0.035; tri.moveTo(-FW, 0); tri.lineTo(FW, 0); tri.lineTo(0, H); tri.closePath();
+  const D = 2 * FD - 2 * BEV, baseGeo = new T.ExtrudeGeometry(tri, { depth: D, ...bevel }); baseGeo.rotateX(Math.PI / 2); baseGeo.translate(0, D / 2, 0);
+  const baseMat = mat(), base = new T.Mesh(baseGeo, baseMat); base.castShadow = base.receiveShadow = true; scene.add(base);
+  R3 = { renderer, scene, camera, pivot, plankMat, baseMat, shadowMat, fitKey: '', dist: 10, d: [0, 1], target: new T.Vector3(0, 0, P * 0.55) };
+  resize();
+}
+/** 카메라를 방향 dir 쪽, 거리 dist 에 놓음. ox · oy = 화면 오른쪽 · 위쪽으로 살짝 돌아간 정도 */
+function placeCamera(dist, ox, oy) {
+  const T = THREE, c = R3.camera, dir = new T.Vector3(...(ch > cw ? CFG.camPhone : CFG.camDesk)).normalize();
+  const right = new T.Vector3().crossVectors(new T.Vector3(0, 0, 1), dir).normalize(), up = new T.Vector3().crossVectors(dir, right);
+  c.position.copy(dir).addScaledVector(right, ox).addScaledVector(up, oy).normalize().multiplyScalar(dist).add(R3.target);
+  c.lookAt(R3.target); c.updateMatrixWorld();
+}
+/** 시소가 양쪽 끝까지 기울어도 주어진 영역(문장 아래 · 폰은 아래 글자 위)에 꽉 차게: 카메라 거리와 화면 안 위치를 맞춤 */
+function fit3(top, bottom) {
+  const T = THREE, c = R3.camera, f = LIVE ? 0.84 : 0.9;   // 카메라가 도는 만큼 여유
+  c.aspect = cw / ch; c.clearViewOffset(); c.updateProjectionMatrix();
+  const pts = [];
+  for (const sgn of [-1, 0, 1]) { const ph = sgn * A, co = Math.cos(ph), sn = Math.sin(ph);
+    for (const u of [-L, L]) for (const y of [-W_, W_]) for (const z of [0, TH3]) pts.push(new T.Vector3(u * co + z * sn, y, P - u * sn + z * co)); }
+  for (const x of [-FW, FW]) for (const y of [-FD, FD]) pts.push(new T.Vector3(x, y, 0));
+  const bbox = (dist) => { placeCamera(dist, 0, 0); let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const q of pts) { const v = q.clone().project(c), x = (v.x + 1) / 2 * cw, y = (1 - v.y) / 2 * ch; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    return { x0, x1, y0, y1 }; };
+  const aw = cw, ah = ch - top - bottom;
+  let lo = 2.5, hi = 120;
+  for (let i = 0; i < 26; i++) { const m = (lo + hi) / 2, b = bbox(m); if (b.x1 - b.x0 <= aw * f && b.y1 - b.y0 <= ah * f) hi = m; else lo = m; }
+  const b = bbox(hi);
+  c.setViewOffset(cw, ch, (b.x0 + b.x1) / 2 - aw / 2, (b.y0 + b.y1) / 2 - (top + ah / 2), cw, ch); c.updateProjectionMatrix();
+  R3.dist = hi;
+  // 판의 화면 방향 (+x 끝 → −x 끝) — 기울기 입력을 이 방향에 투영
+  const pa = new T.Vector3(-1, 0, P).project(c), pb = new T.Vector3(1, 0, P).project(c);
+  const dx = (pa.x - pb.x) * cw, dy = -(pa.y - pb.y) * ch, n = Math.hypot(dx, dy) || 1;
+  R3.d = [dx / n, dy / n];
+}
 function draw(now) {
   const n = st.hits[0] + st.hits[1], C = colorsAt(n), pal = CFG.palette;
-  const bg = pal[C.bg], plank = pal[C.plank], base = pal[C.base], shadowC = pal[C.shadow], text = plank;
-  if (n !== shownN) {   // CSS 쪽 (탭 투 플레이 · 바탕 · QR) 도 같은 색으로
+  const bg = pal[C.bg], plank = pal[C.plank], base = pal[C.base], text = plank;
+  if (!R3) init3();
+  if (n !== shownN) {   // CSS 쪽 (탭 투 플레이 · 바탕 · QR) 과 3D 재질도 같은 색으로
     shownN = n;
     const s = document.documentElement.style;
     s.setProperty('--bg', bg); s.setProperty('--text', text); s.setProperty('--qr', qrColor(bg));
+    R3.renderer.setClearColor(bg); R3.plankMat.color.set(plank); R3.baseMat.color.set(base); R3.shadowMat.color.set(shade(bg, 0.42));
   }
-  const vn = viewAt(n), cap = captionLayout(), Lo = layout(cap, vn); Lo.vn = vn;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = bg; ctx.fillRect(0, 0, cw, ch);
+  const cap = captionLayout();
+  const top = cap ? cap.bottom + ch * 0.02 : 56, bottom = LIVE ? 84 : ch * 0.03, key = [cw, ch, Math.round(top)].join();
+  if (R3.fitKey !== key) { R3.fitKey = key; fit3(top, bottom); }
+  R3.pivot.rotation.y = st.s * A;
+  for (const i of [0, 1]) sway[i] += (swayTo[i] - sway[i]) * 0.1;
+  placeCamera(R3.dist, sway[0], sway[1]);
+  R3.renderer.render(R3.scene, R3.camera);
 
-  ctx.save();
-  ctx.translate(Lo.ox, Lo.oy); ctx.rotate(Lo.th);
-  const U = Lo.U;
-  const pr = VIEWS[vn].proj;
-  const iso = (x, y, z) => { const q = pr(x, y, z); return [q[0] * U, q[1] * U]; };   // 지금 도면으로 3D → 화면
-  const phi = st.s * A;
-  const c = Math.cos(phi), sn = Math.sin(phi);
-  const Wd = (u, y, z) => [u * c + z * sn, y, P - u * sn + z * c];     // 판 좌표 (u 판 길이, z 판 두께) → 3D
-  const B = (u, y, z) => iso(...Wd(u, y, z));
-  const poly = (pts, col) => { ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.closePath(); ctx.fillStyle = col; ctx.fill(); };
-
-  if (vn === 'iso') {
-    // 땅 그림자: 판을 바로 아래 땅에 눌러 놓은 모양 + 받침 발치 (팔레트 색)
-    poly([iso(-L * c, -W_, 0), iso(L * c, -W_, 0), iso(L * c, W_, 0), iso(-L * c, W_, 0)], shadowC);
-    poly([iso(-FW * 1.25, -FD * 1.1, 0), iso(FW * 1.25, -FD * 1.1, 0), iso(FW * 1.25, FD * 1.1, 0), iso(-FW * 1.25, FD * 1.1, 0)], shadowC);
-    // 받침: 삼각 기둥 — 면 사이 명암은 아주 조금만 (플랫하게, 형태만 읽히게)
-    poly([iso(-FW, -FD, 0), iso(0, -FD, P), iso(0, FD, P), iso(-FW, FD, 0)], base);
-    poly([iso(FW, -FD, 0), iso(0, -FD, P), iso(0, FD, P), iso(FW, FD, 0)], shade(base, 0.93));
-    poly([iso(-FW, FD, 0), iso(0, FD, P), iso(FW, FD, 0)], shade(base, 0.86));
-    // 판: 앞 옆면 · 오른쪽 끝면 · 윗면
-    poly([B(-L, W_, 0), B(L, W_, 0), B(L, W_, TH), B(-L, W_, TH)], shade(plank, 0.88));
-    poly([B(L, -W_, 0), B(L, W_, 0), B(L, W_, TH), B(L, -W_, TH)], shade(plank, 0.82));
-    poly([B(-L, -W_, TH), B(L, -W_, TH), B(L, W_, TH), B(-L, W_, TH)], plank);
-  } else if (vn === 'plan') {
-    // 평면도: 위에서 본 판(긴 네모) 과 받침. 움직임은 그림자로 읽힘 — 뜬 끝의 그림자는 멀어지고, 닿은 끝은 판에 붙음
-    const S = (x, y, z) => iso(...sunPt(x, y, z));
-    poly([S(...Wd(-L, -W_, 0)), S(...Wd(L, -W_, 0)), S(...Wd(L, W_, 0)), S(...Wd(-L, W_, 0))], shadowC);
-    poly([iso(-FW, -FD, 0), iso(0, -FD, 0), iso(0, FD, 0), iso(-FW, FD, 0)], base);
-    poly([iso(FW, -FD, 0), iso(0, -FD, 0), iso(0, FD, 0), iso(FW, FD, 0)], shade(base, 0.93));
-    poly([B(-L, -W_, TH), B(L, -W_, TH), B(L, W_, TH), B(-L, W_, TH)], plank);
-  } else {
-    // 입면도: 옆에서 본 판(얇은 막대) · 받침(세모) · 땅에 깔린 그림자 띠
-    poly([iso(-L * c, 0, 0), iso(L * c, 0, 0), iso(L * c, 0, -GL), iso(-L * c, 0, -GL)], shadowC);
-    poly([iso(-FW, 0, 0), iso(0, 0, P), iso(FW, 0, 0)], base);
-    poly([B(-L, 0, 0), B(L, 0, 0), B(L, 0, TH), B(-L, 0, TH)], plank);
-  }
-  ctx.restore();
-
-  // 문장 — 데스크톱만, 화면 맨 위
+  // 문장 — 데스크톱만, 화면 맨 위 (3D 위에 얹은 2D 캔버스)
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, cw, ch);
   if (cap) { ctx.font = cap.font; ctx.fillStyle = text; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.fillText(CFG.caption, cap.x, cap.y); }
-  return Lo;
+  return R3;
 }
 
 /* ───────── QR — 점 모듈 + 둥근 사각 파인더. 주소를 짧게(?r=4글자) 해서 칸 수를 29×29 로 (currentColor 라 CSS --qr 로 색이 바뀜) ───────── */
@@ -389,7 +390,7 @@ function receive(m) {
   lastSeq = m.n; remote = m; remoteAt = performance.now();
 }
 /* ───────── 하나의 게임 ─────────
-   마지막 착지 횟수를 브로커에 '남겨 두는 메시지'(retain)로 올림. 누가 열든 거기서부터 이어서 함 (색 · 시점이 모두 횟수로 정해지므로).
+   마지막 착지 횟수를 브로커에 '남겨 두는 메시지'(retain)로 올림. 누가 열든 거기서부터 이어서 함 (색이 횟수로 정해지므로).
    동시에 여러 사람이 하면 더 큰 횟수를 따라감. ?n=숫자 로 열면 그 횟수에서 혼자 시작 (남기지도 받지도 않음 — 미리 보기용) */
 const FIXED_N = params.has('n') ? Math.max(0, parseInt(params.get('n'), 10) || 0) : null;
 const WORLD = TOPIC(CFG.world);
@@ -456,7 +457,7 @@ if (!LIVE) hostRoom();
 let mqAt = 0;
 function sendState(now) {
   if (!ROOM) return;
-  const m = { n: ++seq, s: +st.s.toFixed(4), h: st.hits, k: st.k.map((k) => +k.toFixed(3)) };
+  const m = { n: ++seq, s: +st.s.toFixed(4), h: st.hits, k: st.k.map((k) => +k.toFixed(3)), c: swayTo.map((v) => +v.toFixed(3)) };
   if (conn && conn.open) conn.send(m);
   if (mq && mq.connected && now - mqAt > 33) { mqAt = now; mq.publish(TOPIC(ROOM), JSON.stringify(m), { qos: 0 }); }
 }
@@ -464,6 +465,7 @@ function sendState(now) {
 function applyRemote() {
   const m = remote;
   st.s += (m.s - st.s) * 0.45;   // 중계(MQTT)로 오면 1초 30번이라 그 사이를 부드럽게 이음
+  if (Array.isArray(m.c)) { swayTo[0] = +m.c[0] || 0; swayTo[1] = +m.c[1] || 0; }   // 폰을 기울인 만큼 데스크톱 카메라도 같이
   for (const i of [0, 1]) if (m.h[i] !== st.hits[i]) {
     const landed = m.h[i] > st.hits[i];
     st.hits[i] = m.h[i]; st.k[i] = m.k[i];
@@ -483,9 +485,13 @@ function frame(now) {
   } else if (Lo) {
     const d = plankDir(Lo);
     let input = keyIn;
+    const lim = (v) => Math.max(-CFG.swayMax, Math.min(CFG.swayMax, v * CFG.sway));
+    swayTo[0] = lim(-keyIn * 0.12); swayTo[1] = 0;
     if (ori && base) {
       const t = tiltOf(ori, base), dx = Math.sign(d[0] || 1) * Math.max(Math.abs(d[0]), CFG.sideways);
       input = (t[0] * dx + t[1] * d[1]) / CFG.sens;
+      // 폰이 창문이고 시소가 그 안에 있는 것처럼: 왼쪽으로 기울이면 오른쪽에서, 위쪽을 숙이면 아래쪽에서 보게 됨
+      swayTo[0] = lim(-t[0]); swayTo[1] = lim(t[1]);
     }
     step(dt, Math.max(-1, Math.min(1, input)), now);
     sendState(now);
